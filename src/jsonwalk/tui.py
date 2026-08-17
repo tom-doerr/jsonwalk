@@ -3,6 +3,12 @@
 The model lives on the GPU and a walk takes seconds, so everything that
 touches it runs in a thread worker and reports back through
 ``call_from_thread``. The UI thread never blocks.
+
+Layout is built for a small terminal. Inputs are stacked one per row with the
+label to their left, because side by side they collapse to a couple of
+characters each on a narrow window. The preamble is a whole document, so it
+lives on its own screen (F2) rather than eating six rows of the main view,
+and everything that needs explaining is on the help screen (F1).
 """
 
 from __future__ import annotations
@@ -11,7 +17,8 @@ import json
 
 from textual import on, work
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
     DataTable,
@@ -19,6 +26,7 @@ from textual.widgets import (
     Header,
     Input,
     Label,
+    Markdown,
     Static,
     TextArea,
 )
@@ -30,7 +38,7 @@ from .walk import WalkConfig, WalkStats
 
 COLUMNS = (
     ("#", 3),
-    ("value", 34),
+    ("value", 30),
     ("P(value)", 10),
     ("tok", 4),
     ("paths", 6),
@@ -39,17 +47,133 @@ COLUMNS = (
     ("bool_mass", 10),
 )
 
+HELP = """\
+# jsonwalk
+
+Builds `{"<string field>": "<value>", "<bool field>": true}` by asking a base
+language model to write it, then reads the answer off the probabilities.
+
+## What you type
+
+| Field | Meaning |
+| --- | --- |
+| **string field** | The JSON key whose values get enumerated, e.g. `city_name`. |
+| **bool field** | A yes/no key applied to each value, e.g. `is_in_europe`. |
+| **values (k)** | **How many values to list** - the k of "top k". 20 is a good start. A larger k means a longer search, not just a longer table. |
+
+## What you get back
+
+| Column | Meaning |
+| --- | --- |
+| **P(value)** | Probability of the whole string, summed over every way of spelling it in tokens. |
+| **tok** | Tokens in the most likely spelling. Values of different lengths compete fairly. |
+| **paths** | How many distinct tokenizations were merged into this row. |
+| **D(T-F)** | `log P(true) - log P(false)`. **The verdict.** `+2.3` means the model is ~10x more willing to write true. |
+| **P(true)** | The same thing as a probability, given a boolean is written at all. |
+| **bool_mass** | `P(true) + P(false)` in absolute terms. **Read this first.** |
+
+## bool_mass is the sanity check
+
+If `bool_mass` is low the model never intended to write a boolean in that
+slot, and `D(T-F)` is a ratio between two things it did not want to say. With
+no preamble at all its favourite continuation there is a *digit*. The fix is
+the preamble (F2), not a bigger k.
+
+## Preamble (F2)
+
+A base model continues a document, so the preamble decides both which values
+appear and whether the boolean means anything. The default uses worked
+examples from unrelated domains on purpose: examples that reuse the field you
+are asking about hijack it - ask for `city_name` with startup examples and you
+get Stripe and Google. `{field}` and `{bool_field}` expand to what you typed.
+
+## Keys
+
+| Key | Action |
+| --- | --- |
+| `ctrl+r` or `enter` | Run |
+| `ctrl+s` | Sort by likelihood / by verdict |
+| `ctrl+y` | Copy every row as JSON |
+| `F2` | Edit the preamble |
+| `F1` | This help |
+| `ctrl+q` | Quit |
+"""
+
 CSS = """
 Screen { layout: vertical; }
-#config { height: auto; border: round $primary; padding: 0 1; }
-#preamble { height: 6; border: none; }
-#fields { height: auto; }
-#fields Input { width: 1fr; }
-#fields Label { width: auto; padding: 1 1 0 1; }
+
+/* One input per row: side by side they collapse to a few characters on a
+   narrow terminal. Borderless and height 1 so three rows cost three rows. */
+#fields { height: auto; border: round $primary; padding: 0 1; }
+.row { height: 1; }
+.row Label { width: 14; color: $text-muted; }
+.row Input { height: 1; border: none; padding: 0; background: $boost; }
+
 #status { height: auto; padding: 0 1; color: $text-muted; }
-#detail { height: 3; padding: 0 1; border: round $secondary; }
+#detail { height: 2; padding: 0 1; color: $text-muted; }
 DataTable { height: 1fr; }
+
+HelpScreen, PreambleScreen { align: center middle; }
+#sheet {
+    width: 90%;
+    max-width: 96;
+    height: 85%;
+    border: round $primary;
+    background: $surface;
+    padding: 0 1;
+}
+#preamble { height: 1fr; border: none; }
+#buttons { height: 3; align: right middle; }
+#buttons Button { margin: 0 1; }
 """
+
+
+class HelpScreen(ModalScreen[None]):
+    """Everything that would otherwise need a label on the main screen."""
+
+    BINDINGS = [("escape,f1,q", "close", "Close")]
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="sheet"):
+            yield Markdown(HELP)
+        yield Footer()
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
+class PreambleScreen(ModalScreen[str]):
+    """The preamble is a document, not a field. It gets its own screen."""
+
+    BINDINGS = [("escape", "cancel", "Cancel"), ("ctrl+s", "save", "Save")]
+
+    def __init__(self, text: str) -> None:
+        super().__init__()
+        self._text = text
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="sheet"):
+            yield Label(
+                "Preamble  -  {field} and {bool_field} expand to your field names"
+            )
+            yield TextArea(self._text, id="preamble", show_line_numbers=False)
+            with Horizontal(id="buttons"):
+                yield Button("Reset to default", id="reset")
+                yield Button("Cancel", id="cancel")
+                yield Button("Save", id="save", variant="primary")
+        yield Footer()
+
+    @on(Button.Pressed, "#reset")
+    def _reset(self) -> None:
+        self.query_one("#preamble", TextArea).text = DEFAULT_PREAMBLE
+
+    @on(Button.Pressed, "#cancel")
+    def action_cancel(self) -> None:
+        self.dismiss(self._text)
+
+    @on(Button.Pressed, "#save")
+    def action_save(self) -> None:
+        self.dismiss(self.query_one("#preamble", TextArea).text)
 
 
 class JsonWalkApp(App):
@@ -61,6 +185,8 @@ class JsonWalkApp(App):
         ("ctrl+r", "run", "Run"),
         ("ctrl+s", "sort", "Sort"),
         ("ctrl+y", "copy", "Copy JSON"),
+        ("f2", "preamble", "Preamble"),
+        ("f1", "help", "Help"),
         ("ctrl+q", "quit", "Quit"),
     ]
 
@@ -70,21 +196,22 @@ class JsonWalkApp(App):
         self.k = k
         self.lm = None  # HFLanguageModel, built on first run inside the worker
         self.result: RunResult | None = None
+        self.preamble = DEFAULT_PREAMBLE
         self.sort_by_delta = False
         self.busy = False
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Vertical(id="config"):
-            yield TextArea(DEFAULT_PREAMBLE, id="preamble", show_line_numbers=False)
-            with Horizontal(id="fields"):
+        with Vertical(id="fields"):
+            with Horizontal(classes="row"):
                 yield Label("string field")
                 yield Input(value="startup_name", id="field")
+            with Horizontal(classes="row"):
                 yield Label("bool field")
                 yield Input(value="good_sounding_name", id="bool_field")
-                yield Label("k")
+            with Horizontal(classes="row"):
+                yield Label("values (k)")
                 yield Input(value=str(self.k), id="k", type="integer")
-                yield Button("Run", id="run", variant="primary")
         yield Static("", id="status")
         yield DataTable(id="table", cursor_type="row", zebra_stripes=True)
         yield Static("", id="detail")
@@ -94,23 +221,30 @@ class JsonWalkApp(App):
         table = self.query_one("#table", DataTable)
         for name, width in COLUMNS:
             table.add_column(name, width=width, key=name)
-        self.set_status(f"press ctrl+r to run  |  model {self.model_id}")
+        self.set_status("enter or ctrl+r to run   -   F1 explains every column")
 
     def set_status(self, text: str) -> None:
         self.query_one("#status", Static).update(text)
 
     # -- actions ---------------------------------------------------------
-    @on(Button.Pressed, "#run")
-    def _on_run_button(self) -> None:
-        self.action_run()
-
     @on(Input.Submitted)
     def _on_submit(self) -> None:
         self.action_run()
 
+    def action_help(self) -> None:
+        self.push_screen(HelpScreen())
+
+    def action_preamble(self) -> None:
+        def store(text: str | None) -> None:
+            if text is not None and text != self.preamble:
+                self.preamble = text
+                self.set_status("preamble updated - ctrl+r to re-run")
+
+        self.push_screen(PreambleScreen(self.preamble), store)
+
     def action_run(self) -> None:
         if self.busy:
-            self.set_status("already running -- wait for the current walk")
+            self.set_status("already running - wait for the current walk")
             return
         try:
             config = self.read_config()
@@ -127,11 +261,11 @@ class JsonWalkApp(App):
         if not field or not bool_field:
             raise ValueError("both field names are required")
         if not raw_k.isdigit() or int(raw_k) < 1:
-            raise ValueError("k must be a positive integer")
+            raise ValueError("values (k) must be a positive integer")
         return RunConfig(
             field=field,
             bool_field=bool_field,
-            preamble=self.query_one("#preamble", TextArea).text,
+            preamble=self.preamble,
             walk=WalkConfig(k=int(raw_k)),
         )
 
@@ -197,7 +331,7 @@ class JsonWalkApp(App):
             if worst < 0.5:
                 note += (
                     f"  |  WARNING bool_mass down to {worst:.2f}: the model is "
-                    "not reliably writing a boolean -- strengthen the preamble"
+                    "not reliably writing a boolean - edit the preamble (F2)"
                 )
         self.set_status(note)
 
@@ -233,8 +367,7 @@ class JsonWalkApp(App):
         row = next((r for r in self.result.rows if r.rank == rank), None)
         if row is None:
             return
-        obj = json.dumps(row.as_object(self.result.schema), ensure_ascii=False)
-        detail = obj
+        detail = json.dumps(row.as_object(self.result.schema), ensure_ascii=False)
         if row.bool_score is not None:
             words = "  ".join(
                 f"{w}={lp:.2f}" for w, lp in row.bool_score.per_word.items()

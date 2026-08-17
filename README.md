@@ -168,10 +168,34 @@ $ jsonwalk pet_name is_cute -k 4 --objects
 explicit form of the default, `jsonwalk tui` opens the interface). A field
 actually named `run` needs `jsonwalk run run <bool_field>`.
 
-In the TUI: `ctrl+r` run, `ctrl+s` toggle sorting between value likelihood and
-true/false delta, `ctrl+y` copy every row as JSON, `ctrl+q` quit. Edit the
-preamble in the box at the top; `{field}` and `{bool_field}` expand to the
-field names you typed.
+### The TUI
+
+Run `jsonwalk` with no arguments. Three stacked inputs, then the results:
+
+```
+╭──────────────────────────────────────────────────────────────╮
+│ string field  startup_name                                   │
+│ bool field    good_sounding_name                             │
+│ values (k)    20                                             │
+╰──────────────────────────────────────────────────────────────╯
+ enter or ctrl+r to run   -   F1 explains every column
+ #   value              P(value)   tok  paths  D(T-F)  P(true)
+ 1   Google              0.02139     2      4   +1.13     0.75
+```
+
+| Key | Action |
+| --- | --- |
+| `ctrl+r` / `enter` | Run |
+| `ctrl+s` | Sort by likelihood or by verdict |
+| `ctrl+y` | Copy every row as JSON |
+| `F2` | Edit the preamble |
+| `F1` | Help: what `k` is, what every column means |
+| `ctrl+q` | Quit |
+
+One input per row is deliberate. Laid out side by side they collapse to two
+or three characters each on a narrow window, and the preamble is a whole
+document rather than a field — it gets its own screen (`F2`) instead of
+taking six rows off the table.
 
 As a library:
 

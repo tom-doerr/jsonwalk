@@ -9,10 +9,11 @@ import asyncio
 
 from fake_lm import FakeLM
 from jsonwalk.engine import RunConfig, run
-from jsonwalk.tui import JsonWalkApp
+from jsonwalk.prompt import DEFAULT_PREAMBLE
+from jsonwalk.tui import HelpScreen, JsonWalkApp, PreambleScreen
 from jsonwalk.walk import WalkConfig
 from test_engine import TABLE, VOCAB
-from textual.widgets import DataTable, Input, Static
+from textual.widgets import DataTable, Input, Static, TextArea
 
 
 def make_result():
@@ -42,6 +43,62 @@ def test_app_mounts_with_all_expected_widgets():
         assert app.query_one("#field", Input).value == "startup_name"
         assert app.query_one("#bool_field", Input).value == "good_sounding_name"
         assert len(app.query_one("#table", DataTable).columns) == 8
+
+    drive(check)
+
+
+def test_inputs_are_stacked_one_per_row():
+    # Side by side they collapse to a couple of characters on a narrow
+    # terminal, which is what this layout exists to avoid.
+    async def check(app, pilot):
+        rows = app.query(".row")
+        assert len(rows) == 3
+        for row in rows:
+            assert len(row.query(Input)) == 1
+
+    drive(check)
+
+
+def test_main_screen_has_no_preamble_editor():
+    # The preamble is a document; it lives on its own screen so it does not
+    # eat six rows of a small terminal.
+    async def check(app, pilot):
+        assert not app.screen.query(TextArea)
+        assert app.preamble == DEFAULT_PREAMBLE
+
+    drive(check)
+
+
+def test_help_screen_opens_and_closes():
+    async def check(app, pilot):
+        await pilot.press("f1")
+        assert isinstance(app.screen, HelpScreen)
+        await pilot.press("escape")
+        assert not isinstance(app.screen, HelpScreen)
+
+    drive(check)
+
+
+def test_preamble_screen_edits_are_kept_and_used():
+    async def check(app, pilot):
+        await pilot.press("f2")
+        assert isinstance(app.screen, PreambleScreen)
+        app.screen.query_one("#preamble", TextArea).text = "custom\n"
+        app.screen.action_save()
+        await pilot.pause()
+        assert app.preamble == "custom\n"
+        assert app.read_config().preamble == "custom\n"
+
+    drive(check)
+
+
+def test_preamble_screen_cancel_keeps_the_old_text():
+    async def check(app, pilot):
+        await pilot.press("f2")
+        app.screen.query_one("#preamble", TextArea).text = "discarded\n"
+        app.screen.action_cancel()
+        await pilot.pause()
+        assert app.preamble == DEFAULT_PREAMBLE
 
     drive(check)
 
