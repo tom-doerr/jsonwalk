@@ -5,6 +5,8 @@ of a string field, then measures how strongly the model would follow each one
 with ``true`` rather than ``false`` in a companion boolean field.
 """
 
+from .constraints import SubstringOf, ValueConstraint
+from .edit import Edit, EditConfig, EditSchema, propose_edits
 from .engine import Row, RunConfig, RunResult, run
 from .lm import LanguageModel, TopK
 from .prompt import DEFAULT_PREAMBLE, Schema
@@ -15,6 +17,12 @@ __version__ = "0.1.0"
 
 __all__ = [
     "BoolScore",
+    "Edit",
+    "EditConfig",
+    "EditSchema",
+    "SubstringOf",
+    "ValueConstraint",
+    "propose_edits",
     "DEFAULT_PREAMBLE",
     "LanguageModel",
     "Row",

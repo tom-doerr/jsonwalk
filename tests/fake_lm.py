@@ -29,6 +29,9 @@ class FakeLM:
         self._longest_first = sorted(self.vocab, key=len, reverse=True)
         self.forward_calls = 0
         self.rows_forwarded = 0
+        #: every sequence the walk asked to expand, so a test can assert that
+        #: a pruned branch was never explored rather than merely filtered
+        self.seen_sequences: list[tuple[int, ...]] = []
 
     # -- tokenizer -------------------------------------------------------
     def encode(self, text: str) -> list[int]:
@@ -63,6 +66,7 @@ class FakeLM:
         self.rows_forwarded += len(sequences)
         results = []
         for seq in sequences:
+            self.seen_sequences.append(tuple(seq))
             ranked = sorted(self._dist(seq).items(), key=lambda kv: (-kv[1], kv[0]))
             ranked = ranked[:top_k]
             before = 0.0

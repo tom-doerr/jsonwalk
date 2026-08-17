@@ -353,6 +353,54 @@ for row in result.rows:
     print(row.as_object(result.schema), row.bool_score.delta)
 ```
 
+## `jsonwalk edit` — the same trick applied to editing text
+
+Same three ideas, one more field:
+
+```json
+{"search": "in order to", "replace": "to", "improves_objective": true}
+```
+
+```bash
+jsonwalk edit draft.md -o "Make it concise."
+jsonwalk edit draft.md -o "Remove hedging." --sort delta
+jsonwalk edit draft.md -o "Be concise." --iterations 3 --in-place
+```
+
+The point is the constraint. `search` is walked under `SubstringOf(document)`,
+and because **substring-ness is prefix-closed**, that is a sound *incremental*
+test: a branch dies the moment it leaves the document, rather than being
+generated and rejected afterwards. On a two-line file that pruned **8425
+branches in 328 expansions**.
+
+So the usual failure of model-written search/replace — an anchor that is not
+in the file — is not filtered out, it is **unreachable**. Anchors are also
+required to be unique, so an edit always applies to exactly the intended spot.
+`--min-anchor` sets a length floor, which matters because shorter strings are
+always more probable.
+
+`replace` is then walked conditioned on the chosen anchor, and each pair is
+judged against your stated objective. The objective genuinely steers it — the
+same document and the same anchors, in opposite directions:
+
+| anchor | `-o "Make it concise"` | `-o "Make it formal and verbose"` |
+| --- | --- | --- |
+| `we are currently` | → `we are` | → `we are presently` |
+| `we are` | → `we` | → `we are currently` |
+| `optimization` | → `optimize` | → `workflow optimization` |
+
+Nothing is written without `--in-place`, and you always get a unified diff.
+
+**What a 0.8B judge is actually good for.** It finds real edits
+(`"In the event that a build fails" → "if a build fails"`,
+`"configuration file" → "config"`) but it is not a careful editor: over three
+`--iterations` it also produced `"if a build fails" → "if build fails"`,
+dropping an article, and it never touched the wordiest clause in the file.
+Anchor choice is driven by `P(search)`, so it edits where the text is
+*predictable*, not where it is *worst*. Point `--model` at something larger if
+you want the judgement to carry weight — the constraint machinery is
+model-independent.
+
 ## Known trade-offs
 
 * **Few-shot examples are a bias you are choosing to accept.** They are what

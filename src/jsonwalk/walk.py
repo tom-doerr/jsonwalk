@@ -26,7 +26,13 @@ from dataclasses import field as dc_field
 
 from .lm import LanguageModel
 from .logmath import NEG_INF, logsumexp
-from .prompt import InvalidJSONString, first_unescaped_quote, unescape
+from .constraints import ValueConstraint
+from .prompt import (
+    InvalidJSONString,
+    decode_partial,
+    first_unescaped_quote,
+    unescape,
+)
 
 # JSON forbids raw control characters inside strings; if the model emits one
 # it has left the string rather than closed it, and the branch is dead.
@@ -107,6 +113,7 @@ class WalkStats:
     complete_top_k: bool = False
     truncated_paths: int = 0
     invalid_paths: int = 0
+    rejected_paths: int = 0
     found_logmass: float = NEG_INF
 
     def as_dict(self) -> dict[str, object]:
@@ -119,6 +126,7 @@ class WalkStats:
             "complete_top_k": self.complete_top_k,
             "truncated_paths": self.truncated_paths,
             "invalid_paths": self.invalid_paths,
+            "rejected_paths": self.rejected_paths,
             "found_mass": math.exp(self.found_logmass),
         }
 
@@ -166,12 +174,17 @@ def walk_values(
     prefix_ids: Sequence[int],
     config: WalkConfig | None = None,
     on_progress: Callable[[WalkStats], None] | None = None,
+    constraint: ValueConstraint | None = None,
 ) -> tuple[list[ValueCandidate], WalkStats]:
     """Enumerate the most likely values for the string field.
 
     ``prefix_ids`` must end at the value's opening quote (see
     :meth:`jsonwalk.prompt.Schema.value_prefix`). Returns candidates sorted by
     descending probability plus the stats of the search that produced them.
+
+    A ``constraint`` prunes branches as they grow rather than filtering
+    finished values, which is what makes something like "must appear verbatim
+    in this document" cheap: the branch dies the moment it leaves the text.
     """
     cfg = config or WalkConfig()
     prefix = tuple(prefix_ids)
@@ -218,6 +231,9 @@ def walk_values(
                     except InvalidJSONString:
                         stats.invalid_paths += 1
                         continue
+                    if constraint is not None and not constraint.accepts(value):
+                        stats.rejected_paths += 1
+                        continue
                     merged.setdefault(value, _Merged()).add(child_lp, raw, child)
                     continue
 
@@ -225,6 +241,15 @@ def walk_values(
                     # Left the string without closing it: dead branch.
                     stats.invalid_paths += 1
                     continue
+                if constraint is not None:
+                    try:
+                        partial = decode_partial(text)
+                    except InvalidJSONString:
+                        stats.invalid_paths += 1
+                        continue
+                    if not constraint.allows(partial):
+                        stats.rejected_paths += 1
+                        continue
                 if len(child) >= cfg.max_tokens:
                     stats.truncated_paths += 1
                     continue

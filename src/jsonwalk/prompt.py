@@ -99,6 +99,23 @@ def unescape(raw: str) -> str:
     return decoded
 
 
+def decode_partial(raw: str) -> str:
+    """Decode as much of an unfinished JSON string body as is decodable.
+
+    A partial value can stop in the middle of an escape (``\\``, ``\\u00``),
+    which is not valid JSON yet but is not wrong either. Rather than guess,
+    trim from the end until it parses; the longest escape is ``\\uXXXX``, so
+    at most five characters are ever in limbo.
+    """
+    for cut in range(0, 6):
+        candidate = raw[: len(raw) - cut] if cut else raw
+        try:
+            return json.loads('"' + candidate + '"')
+        except json.JSONDecodeError:
+            continue
+    raise InvalidJSONString(f"undecodable even after trimming: {raw!r}")
+
+
 @dataclass(frozen=True)
 class Schema:
     """The two-field JSON object being explored."""
