@@ -13,6 +13,7 @@ from jsonwalk.prompt import DEFAULT_PREAMBLE
 from jsonwalk.tui import COLUMNS, HelpScreen, JsonWalkApp, PreambleScreen
 from jsonwalk.walk import WalkConfig
 from test_engine import TABLE, VOCAB
+from textual.screen import Screen
 from textual.widgets import DataTable, Input, Static, TextArea
 
 
@@ -79,6 +80,53 @@ def test_help_screen_opens_and_closes():
     drive(check)
 
 
+def test_every_screen_is_reachable_without_function_keys():
+    # Some keyboards put F-keys behind a layer; nothing may depend on them.
+    async def check(app, pilot):
+        await pilot.press("ctrl+g")
+        assert isinstance(app.screen, HelpScreen)
+        await pilot.press("escape")
+        await pilot.pause()
+
+        await pilot.press("ctrl+b")
+        assert isinstance(app.screen, PreambleScreen)
+        await pilot.press("escape")
+        await pilot.pause()
+        assert isinstance(app.screen, Screen)
+
+    drive(check)
+
+
+def test_buttons_reach_the_same_actions_as_the_keys():
+    # The mouse path must work too, for anyone who memorises nothing.
+    async def check(app, pilot):
+        await pilot.click("#helpbtn")
+        assert isinstance(app.screen, HelpScreen)
+        await pilot.press("escape")
+        await pilot.pause()
+
+        await pilot.click("#preamblebtn")
+        assert isinstance(app.screen, PreambleScreen)
+        await pilot.press("escape")
+        await pilot.pause()
+
+        app.show_result(make_result())
+        await pilot.click("#sortbtn")
+        await pilot.pause()
+        assert app.sort_mode == "joint"
+
+    drive(check)
+
+
+def test_keys_that_input_widgets_claim_are_not_used():
+    # ctrl+a/e/d/f/k/u/w are Input's own editing bindings and ctrl+p is the
+    # command palette; binding any of them would break typing in a field.
+    claimed = {"ctrl+a", "ctrl+e", "ctrl+d", "ctrl+f", "ctrl+k", "ctrl+u",
+               "ctrl+w", "ctrl+x", "ctrl+v", "ctrl+p"}
+    ours = {k for b in JsonWalkApp.BINDINGS for k in b[0].split(",")}
+    assert not (ours & claimed)
+
+
 def test_preamble_screen_edits_are_kept_and_used():
     async def check(app, pilot):
         await pilot.press("f2")
@@ -111,7 +159,7 @@ def test_results_render_one_row_per_value():
         await pilot.pause()
         table = app.query_one("#table", DataTable)
         assert table.row_count == len(result.rows)
-        assert "distinct values" in str(app.query_one("#status", Static).render())
+        assert "of the mass" in str(app.query_one("#status", Static).render())
 
     drive(check)
 

@@ -31,7 +31,7 @@ from textual.widgets import (
     TextArea,
 )
 
-from .engine import SORT_LABELS, SORT_MODES, RunConfig, RunResult, run, sort_rows
+from .engine import SORT_LABELS, SORT_MODES, RunConfig, RunResult, run
 from .lm import DEFAULT_MODEL
 from .prompt import DEFAULT_PREAMBLE
 from .walk import WalkConfig, WalkStats
@@ -61,7 +61,7 @@ language model to write it, then reads the answer off the probabilities.
 | --- | --- |
 | **string field** | The JSON key whose values get enumerated, e.g. `city_name`. |
 | **bool field** | A yes/no key applied to each value, e.g. `is_in_europe`. |
-| **values (k)** | **How many values to list** - the k of "top k". 20 is a good start. A larger k means a longer search, not just a longer table. |
+| **values (k)** | **How many rows to show.** 20 is a good start. Five times that many are enumerated and scored behind the scenes, and the k are picked *after* sorting - so switching sort mode can surface a value that was never in the visible list. |
 
 ## What you get back
 
@@ -84,6 +84,11 @@ language model to write it, then reads the answer off the probabilities.
 
 Only the third one ranks by belief alone. If a list looks arbitrary, it is
 probably sorted by the first: `P(value)` has nothing to do with the boolean.
+
+Each mode re-picks the k from the whole scored pool, so a value ranked far
+down by likelihood can appear at the top under another mode. On
+`element` / `is_metal` that is the difference between five metals padded out
+with hydrogen, helium and carbon, and eight metals.
 
 ## Why "paths" is more than 1
 
@@ -110,14 +115,18 @@ get Stripe and Google. `{field}` and `{bool_field}` expand to what you typed.
 
 ## Keys
 
+Every action has a button on the main screen as well as a key, and no key is
+a function key - `F1`/`F2` are aliases, not requirements.
+
 | Key | Action |
 | --- | --- |
 | `ctrl+r` or `enter` | Run |
-| `ctrl+s` | Sort by likelihood / by verdict |
+| `ctrl+s` | Cycle the sort |
 | `ctrl+y` | Copy every row as JSON |
-| `F2` | Edit the preamble |
-| `F1` | This help |
+| `ctrl+b` or `F2` | Edit the preamble |
+| `ctrl+g` or `F1` | This help |
 | `ctrl+q` | Quit |
+| `escape` | Close this screen |
 """
 
 CSS = """
@@ -129,6 +138,14 @@ Screen { layout: vertical; }
 .row { height: 1; }
 .row Label { width: 14; color: $text-muted; }
 .row Input { height: 1; border: none; padding: 0; background: $boost; }
+#actions { height: 1; margin-top: 0; }
+#actions Button {
+    height: 1;
+    border: none;
+    min-width: 8;
+    margin-right: 2;
+    padding: 0 1;
+}
 
 #status { height: auto; padding: 0 1; color: $text-muted; }
 #detail { height: 3; padding: 0 1; color: $text-muted; }
@@ -202,12 +219,15 @@ class JsonWalkApp(App):
 
     CSS = CSS
     TITLE = "jsonwalk"
+    # Every action has a ctrl binding and a button, so nothing needs a
+    # function key: F1/F2 are aliases, not the only way in. ctrl+a/e/d/f/k/u/w
+    # are all consumed by Input, and ctrl+p is the command palette.
     BINDINGS = [
         ("ctrl+r", "run", "Run"),
         ("ctrl+s", "sort", "Sort"),
         ("ctrl+y", "copy", "Copy JSON"),
-        ("f2", "preamble", "Preamble"),
-        ("f1", "help", "Help"),
+        ("ctrl+b,f2", "preamble", "Preamble"),
+        ("ctrl+g,f1", "help", "Help"),
         ("ctrl+q", "quit", "Quit"),
     ]
 
@@ -233,6 +253,12 @@ class JsonWalkApp(App):
             with Horizontal(classes="row"):
                 yield Label("values (k)")
                 yield Input(value=str(self.k), id="k", type="integer")
+            # Clickable and tab-reachable, so no keyboard shortcut is required.
+            with Horizontal(id="actions"):
+                yield Button("Run", id="run", variant="primary")
+                yield Button("Sort", id="sortbtn")
+                yield Button("Preamble", id="preamblebtn")
+                yield Button("Help", id="helpbtn")
         yield Static("", id="status")
         yield DataTable(id="table", cursor_type="row", zebra_stripes=True)
         # markup=False: token pieces are rendered as [Hel][ium]["], and Rich
@@ -253,6 +279,22 @@ class JsonWalkApp(App):
     @on(Input.Submitted)
     def _on_submit(self) -> None:
         self.action_run()
+
+    @on(Button.Pressed, "#run")
+    def _btn_run(self) -> None:
+        self.action_run()
+
+    @on(Button.Pressed, "#sortbtn")
+    def _btn_sort(self) -> None:
+        self.action_sort()
+
+    @on(Button.Pressed, "#preamblebtn")
+    def _btn_preamble(self) -> None:
+        self.action_preamble()
+
+    @on(Button.Pressed, "#helpbtn")
+    def _btn_help(self) -> None:
+        self.action_help()
 
     def action_help(self) -> None:
         self.push_screen(HelpScreen())
@@ -289,7 +331,8 @@ class JsonWalkApp(App):
             field=field,
             bool_field=bool_field,
             preamble=self.preamble,
-            walk=WalkConfig(k=int(raw_k)),
+            k=int(raw_k),
+            walk=WalkConfig(),
         )
 
     def action_sort(self) -> None:
@@ -346,12 +389,13 @@ class JsonWalkApp(App):
         self.fill_table()
         s = result.stats
         note = (
-            f"{s.distinct_values} distinct values, "
+            f"{len(result.rows)} scored of {s.distinct_values} found, "
             f"{s.as_dict()['found_mass']:.1%} of the mass, "
             f"{s.expansions} expansions"
         )
-        if result.rows and result.rows[0].bool_score is not None:
-            worst = min(r.bool_score.bool_mass for r in result.rows)
+        shown = result.select(self.sort_mode)
+        if shown and shown[0].bool_score is not None:
+            worst = min(r.bool_score.bool_mass for r in shown)
             if worst < 0.5:
                 note += (
                     f"  |  WARNING bool_mass down to {worst:.2f}: the model is "
@@ -364,7 +408,10 @@ class JsonWalkApp(App):
             return
         table = self.query_one("#table", DataTable)
         table.clear()
-        for row in sort_rows(self.result.rows, self.sort_mode):
+        # select() re-picks the k from the whole scored pool for this mode,
+        # rather than reshuffling a list that was already cut down by
+        # likelihood. No model call: everything is scored already.
+        for row in self.result.select(self.sort_mode):
             b = row.bool_score
             table.add_row(
                 str(row.rank),

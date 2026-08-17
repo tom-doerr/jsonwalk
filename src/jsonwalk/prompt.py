@@ -40,6 +40,27 @@ SCHEMA_ONLY_PREAMBLE = (
     '// Schema: {"{field}": <string>, "{bool_field}": <true|false>}\n'
 )
 
+# A real JSON Schema. Measured on Qwen3.5-0.8B-Base it is WORSE than examples,
+# and it fails in an interesting way: the schema text names the fields, so the
+# model starts emitting the field names as values -- asking for startup_name
+# returned "My Startup", "Good Sounding", "good_sounding_name". A base model
+# continues the pattern it was shown, and a block of type declarations is a
+# pattern of declarations, not of records. Kept because it is the obvious
+# thing to try and being able to reproduce the result is worth more than an
+# assertion that it does not work.
+JSON_SCHEMA_PREAMBLE = (
+    "// Each line is a JSON object matching this schema:\n"
+    '// {"type": "object", "properties": {"{field}": {"type": "string"}, '
+    '"{bool_field}": {"type": "boolean"}}, '
+    '"required": ["{field}", "{bool_field}"]}\n'
+)
+
+PREAMBLE_STYLES = {
+    "examples": DEFAULT_PREAMBLE,
+    "comment": SCHEMA_ONLY_PREAMBLE,
+    "json-schema": JSON_SCHEMA_PREAMBLE,
+}
+
 
 def first_unescaped_quote(text: str) -> int | None:
     """Index of the first ``"`` not preceded by an odd run of backslashes.

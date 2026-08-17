@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from jsonwalk import __main__ as entry
 from jsonwalk.cli import build_parser, resolve_preamble
-from jsonwalk.prompt import DEFAULT_PREAMBLE, SCHEMA_ONLY_PREAMBLE
+from jsonwalk.prompt import DEFAULT_PREAMBLE, PREAMBLE_STYLES
 
 SRC = str(Path(__file__).resolve().parents[1] / "src")
 
@@ -21,8 +21,9 @@ def test_field_names_are_positional():
 
 def test_preamble_defaults_and_overrides(tmp_path):
     assert resolve_preamble(parse([])) == DEFAULT_PREAMBLE
-    assert resolve_preamble(parse(["--schema-only-preamble"])) == SCHEMA_ONLY_PREAMBLE
     assert resolve_preamble(parse(["--preamble", "hi\n"])) == "hi\n"
+    for style, text in PREAMBLE_STYLES.items():
+        assert resolve_preamble(parse(["--preamble-style", style])) == text
 
     path = tmp_path / "p.txt"
     path.write_text("from a file\n", encoding="utf-8")
@@ -31,7 +32,12 @@ def test_preamble_defaults_and_overrides(tmp_path):
 
 def test_conflicting_preamble_sources_are_rejected():
     with pytest.raises(SystemExit):
-        resolve_preamble(parse(["--preamble", "x", "--schema-only-preamble"]))
+        resolve_preamble(parse(["--preamble", "x", "--preamble-style", "comment"]))
+
+
+def test_empty_preamble_is_honoured_not_treated_as_unset():
+    # `--preamble ""` is a real choice: no preamble at all.
+    assert resolve_preamble(parse(["--preamble", ""])) == ""
 
 
 def test_bare_arguments_go_to_the_cli(monkeypatch):

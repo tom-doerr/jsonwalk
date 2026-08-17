@@ -8,9 +8,9 @@ import shutil
 import sys
 
 from . import __version__
-from .engine import SORT_LABELS, SORT_MODES, RunConfig, RunResult, run, sort_rows
+from .engine import SORT_LABELS, SORT_MODES, RunConfig, RunResult, run
 from .lm import DEFAULT_MODEL
-from .prompt import DEFAULT_PREAMBLE, SCHEMA_ONLY_PREAMBLE
+from .prompt import DEFAULT_PREAMBLE, PREAMBLE_STYLES
 from .walk import WalkConfig
 
 EPILOG = """\
@@ -41,7 +41,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action="version", version=f"jsonwalk {__version__}")
     p.add_argument("field", nargs="?", default="startup_name", help="string field")
     p.add_argument("bool_field", nargs="?", default="good_sounding_name")
-    p.add_argument("-k", type=int, default=20, help="values to return")
+    p.add_argument("-k", type=int, default=20, help="rows to display")
+    p.add_argument(
+        "--pool-factor",
+        type=int,
+        default=5,
+        help=(
+            "enumerate and score k x this many candidates, then pick the k "
+            "after sorting (default 5). 1 disables the pool."
+        ),
+    )
     p.add_argument("--model", default=DEFAULT_MODEL)
     p.add_argument("--max-tokens", type=int, default=16, help="cap per value")
     p.add_argument("--child-top-k", type=int, default=40)
@@ -52,9 +61,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--preamble-file", help="read the preamble from a file")
     p.add_argument(
-        "--schema-only-preamble",
-        action="store_true",
-        help="use the no-examples preamble (weaker verdicts, no echoed values)",
+        "--preamble-style",
+        choices=sorted(PREAMBLE_STYLES),
+        help=(
+            "examples (default, best measured), comment (no examples, weaker "
+            "verdicts), json-schema (worse: the model emits field names as "
+            "values)"
+        ),
     )
     p.add_argument(
         "--sort",
@@ -77,19 +90,21 @@ def build_parser() -> argparse.ArgumentParser:
 
 def resolve_preamble(args: argparse.Namespace) -> str:
     chosen = [
-        bool(args.preamble),
+        args.preamble is not None,
         bool(args.preamble_file),
-        args.schema_only_preamble,
+        args.preamble_style is not None,
     ]
     if sum(chosen) > 1:
-        raise SystemExit("pick at most one of --preamble/--preamble-file/--schema-only")
+        raise SystemExit(
+            "pick at most one of --preamble / --preamble-file / --preamble-style"
+        )
     if args.preamble is not None:
         return args.preamble
     if args.preamble_file:
         with open(args.preamble_file, encoding="utf-8") as fh:
             return fh.read()
-    if args.schema_only_preamble:
-        return SCHEMA_ONLY_PREAMBLE
+    if args.preamble_style is not None:
+        return PREAMBLE_STYLES[args.preamble_style]
     return DEFAULT_PREAMBLE
 
 
@@ -105,7 +120,8 @@ def format_table(result: RunResult, sort: str = "value", width: int = 0) -> str:
         f"{'D(T-F)':>7} {'P(true)':>7} {'mass':>5} {'tok':>3} {'paths':>5} pre"
     )
     lines = [head, "-" * len(head)]
-    for row in sort_rows(result.rows, sort):
+    shown = result.select(sort)
+    for row in shown:
         b = row.bool_score
         cells = f"{row.rank:>3}  {row.value[:vw]:<{vw}} {row.candidate.prob:>9.5f} "
         if b is None:
@@ -126,14 +142,18 @@ def format_table(result: RunResult, sort: str = "value", width: int = 0) -> str:
         + ("; search exhausted" if s.exhausted else "")
         + ("; top-k provably complete" if s.complete_top_k else "")
     )
-    echoed = [r.value for r in result.rows if r.echoed]
+    lines.append(
+        f"showing {len(shown)} of {len(result.rows)} scored candidates, "
+        f"sorted by {SORT_LABELS[sort]} (# is the likelihood rank)"
+    )
+    echoed = [r.value for r in shown if r.echoed]
     if echoed:
         lines.append(
             f"* {len(echoed)} value(s) appear verbatim in the preamble "
             f"({', '.join(echoed[:4])}) -- few-shot examples get echoed back."
         )
-    if result.rows and result.rows[0].bool_score is not None:
-        worst = min(r.bool_score.bool_mass for r in result.rows)
+    if shown and shown[0].bool_score is not None:
+        worst = min(r.bool_score.bool_mass for r in shown)
         if worst < 0.5:
             lines.append(
                 f"WARNING: bool_mass as low as {worst:.3f} -- the model is not "
@@ -149,8 +169,9 @@ def main(argv: list[str] | None = None) -> int:
         bool_field=args.bool_field,
         preamble=resolve_preamble(args),
         score_bool=not args.no_bool,
+        k=args.k,
+        pool_factor=args.pool_factor,
         walk=WalkConfig(
-            k=args.k,
             max_tokens=args.max_tokens,
             child_top_k=args.child_top_k,
             batch_size=args.batch_size,
@@ -166,18 +187,12 @@ def main(argv: list[str] | None = None) -> int:
     result = run(lm, config)
 
     if args.objects:
-        for row in sort_rows(result.rows, args.sort):
+        for row in result.select(args.sort):
             print(json.dumps(row.as_object(result.schema), ensure_ascii=False))
     elif args.json:
-        payload = result.as_dict()
-        payload["sort"] = args.sort
-        payload["rows"] = [
-            r.as_dict(result.schema) for r in sort_rows(result.rows, args.sort)
-        ]
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        print(json.dumps(result.as_dict(args.sort), ensure_ascii=False, indent=2))
     else:
         print(format_table(result, sort=args.sort))
-        print(f"sorted by {SORT_LABELS[args.sort]}", file=sys.stderr)
     return 0
 
 

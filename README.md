@@ -61,7 +61,6 @@ walker scans inside each candidate token rather than waiting for a lone quote.
 
 ### Merging tokenizations
 
-The same string is often reachable by several different token sequences.
 The same value is reachable by several token sequences, and they are summed
 (`logsumexp`) rather than ranked against each other: they are one answer, not
 competing ones. It is worth being precise about what those paths actually are,
@@ -141,18 +140,63 @@ $ jsonwalk element is_metal -k 14 --sort joint
 The `#` column keeps the original likelihood rank, so you can see how far each
 row moved.
 
+### Sorting happens before `k` is chosen
+
+`k` is how many rows you *see*. The walk and the boolean scorer both work on a
+pool — `k × --pool-factor`, 5 by default — and the k are picked from it
+**after** sorting. Selecting first would make every mode a reshuffle of the
+most-likely values, so a value ranked 14th by likelihood but first by verdict
+could never appear.
+
+That is not hypothetical. On `element` / `is_metal` with `k=8`:
+
+| | Result |
+| --- | --- |
+| `--pool-factor 1` (select, then sort) | 5 metals, padded with Hydrogen, Helium, Carbon |
+| default pool | **8 metals** — Silver (#9), Lithium (#10) and Aluminium (#14) displace them |
+
+Cost, model already loaded: 0.97 s at factor 1, **2.12 s at factor 5**. Factor
+10 jumps to 9.4 s, because resolving that far down a flat tail costs the
+search 1297 expansions instead of 241. Switching sort mode in the TUI re-picks
+from the pool with no model call at all.
+
 ## The preamble matters more than anything else
 
 This is a base model completing a document, so the preamble decides both which
 values appear and whether the boolean slot means anything. Measured on
 `Qwen3.5-0.8B-Base`:
 
-| Preamble | `mass` | `city_name` returns |
+| `--preamble-style` | `mass` | What you get |
 | --- | --- | --- |
-| none | 0.04 – 0.20 | — |
-| schema comment (`--schema-only-preamble`) | 0.72 – 0.80 | cities, weak verdicts (New York only +0.07) |
-| examples reusing the queried field name | 0.997 | **Stripe, Google, Amazon** |
-| examples from unrelated domains (default) | 0.82 – 0.99 | cities, sharp verdicts |
+| none at all | 0.04 – 0.20 | the boolean slot fills with a *digit* |
+| `comment` | 0.70 – 0.80 | right values, weak verdicts (New York only +0.07) |
+| `json-schema` | 0.89 – 0.96 | **field names as values** — see below |
+| examples reusing the queried field name | 0.997 | asking `city_name` returns **Stripe, Google, Amazon** |
+| `examples` from unrelated domains (default) | 0.82 – 0.99 | right values, sharpest verdicts |
+
+### Would a JSON Schema work as the preamble?
+
+It is the obvious thing to try, and measured on this model it is worse. Ship
+it with `--preamble-style json-schema` and see for yourself; here is why it
+loses.
+
+A base model continues the pattern it was shown, and a JSON Schema is a
+pattern of *type declarations*, not of *records*. What it does show the model
+is your field names, which it then writes as values:
+
+```
+$ jsonwalk startup_name good_sounding_name --preamble-style json-schema
+   Apple | My Startup | Good Sounding | Hello World | good_sounding | good_sounding_na
+```
+
+`element` degrades the same way (`metal, steel, a, element, 1, foo`). The
+`pre` column catches it automatically — three of eight rows were flagged as
+appearing in the preamble, which is how the failure was spotted.
+
+A schema plus one worked example fixes the field-name leak but hands the whole
+domain to that example: with a film example, `element` returns *Casablanca,
+character, film, actor, director*. Two examples from two different domains —
+the default — dilute the anchor enough to keep both the schema and the values.
 
 The trap in row three is worth spelling out: worked examples buy the highest
 `mass` of all, but if they use the field you are asking about, they hijack it
@@ -235,6 +279,8 @@ Run `jsonwalk` with no arguments. Three stacked inputs, then the results:
 │ bool field    good_sounding_name                             │
 │ values (k)    20                                             │
 ╰──────────────────────────────────────────────────────────────╯
+ Run   Sort   Preamble   Help
+╰──────────────────────────────────────────────────────────────╯
  enter or ctrl+r to run   -   F1 explains every column
  #   value              P(value)   tok  paths  D(T-F)  P(true)
  1   Google              0.02139     2      4   +1.13     0.75
@@ -245,9 +291,15 @@ Run `jsonwalk` with no arguments. Three stacked inputs, then the results:
 | `ctrl+r` / `enter` | Run |
 | `ctrl+s` | Cycle sort: likelihood / likely-and-true / verdict |
 | `ctrl+y` | Copy every row as JSON |
-| `F2` | Edit the preamble |
-| `F1` | Help: what `k` is, what every column means |
+| `ctrl+b` / `F2` | Edit the preamble |
+| `ctrl+g` / `F1` | Help: what `k` is, what every column means |
 | `ctrl+q` | Quit |
+
+Nothing requires a function key — `F1`/`F2` are aliases, and every action also
+has a button on the main screen. The `ctrl` choices are constrained: `Input`
+claims `ctrl+a/e/d/f/k/u/w/x/v` for line editing and `ctrl+p` is Textual's
+command palette, so binding any of those would break typing in a field. A test
+asserts none of them are used.
 
 One input per row is deliberate. Laid out side by side they collapse to two
 or three characters each on a narrow window, and the preamble is a whole
@@ -271,8 +323,8 @@ for row in result.rows:
 * **Few-shot examples are a bias you are choosing to accept.** They are what
   makes the boolean slot mean anything, and the model will echo them — the
   default keeps them off-topic so the echoes are obvious rather than
-  plausible. `--schema-only-preamble` drops them entirely, at the cost of a
-  much weaker boolean signal.
+  plausible, and the `pre` column flags them. `--preamble-style comment` drops
+  them entirely, at the cost of a much weaker boolean signal.
 * **Completeness has a caveat.** The frontier bound is exact for single
   paths. Merging means a brand-new value whose many tokenizations *sum* above
   the cut-off could in principle be missed, so the search keeps going until

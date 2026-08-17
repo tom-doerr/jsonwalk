@@ -8,6 +8,7 @@ from collections.abc import Callable
 # which would shadow dataclasses.field inside the class body.
 from dataclasses import dataclass
 from dataclasses import field as dc_field
+from dataclasses import replace
 
 from .lm import LanguageModel
 from .logmath import NEG_INF
@@ -23,13 +24,31 @@ from .walk import ValueCandidate, WalkConfig, WalkStats, walk_values
 
 @dataclass
 class RunConfig:
+    """What to run.
+
+    ``k`` is how many rows you want to *see*; the search and the boolean
+    scorer both work on a larger pool, and the k are chosen from it *after*
+    sorting. Selecting first would make every sort mode a reshuffle of the
+    most-likely values only -- a value ranked 60th by likelihood but top by
+    verdict could never appear, which defeats the point of the other modes.
+    """
+
     field: str = "startup_name"
     bool_field: str = "good_sounding_name"
     preamble: str = DEFAULT_PREAMBLE
+    k: int = 20
+    pool_factor: int = 5
+    #: ``walk.k`` is overwritten by :func:`run` with :attr:`pool_size`; it only
+    #: has an effect when calling :func:`jsonwalk.walk_values` directly.
     walk: WalkConfig = dc_field(default_factory=WalkConfig)
     true_words: tuple[str, ...] = DEFAULT_TRUE_WORDS
     false_words: tuple[str, ...] = DEFAULT_FALSE_WORDS
     score_bool: bool = True
+
+    @property
+    def pool_size(self) -> int:
+        """Candidates to enumerate and score before the k are chosen."""
+        return max(self.k, self.k * self.pool_factor)
 
     def schema(self) -> Schema:
         return Schema(
@@ -124,18 +143,33 @@ def sort_rows(rows: "tuple[Row, ...] | list[Row]", mode: str) -> list[Row]:
 
 @dataclass(frozen=True)
 class RunResult:
+    """Every scored candidate. Front ends call :meth:`select` to display k.
+
+    ``rows`` is the whole pool, ranked by likelihood; keeping it means
+    switching sort mode re-picks the k from the full pool instead of
+    reshuffling an already-truncated list, with no second model call.
+    """
+
     schema: Schema
     rows: tuple[Row, ...]
     stats: WalkStats
     value_prompt: str
+    k: int = 20
 
-    def as_dict(self) -> dict[str, object]:
+    def select(self, mode: str = "value", k: int | None = None) -> list[Row]:
+        """Sort the whole pool, then take the top k. Order matters."""
+        return sort_rows(self.rows, mode)[: self.k if k is None else k]
+
+    def as_dict(self, mode: str = "value") -> dict[str, object]:
         return {
             "field": self.schema.field,
             "bool_field": self.schema.bool_field,
             "prompt": self.value_prompt,
+            "sort": mode,
+            "k": self.k,
+            "pool": len(self.rows),
             "stats": self.stats.as_dict(),
-            "rows": [r.as_dict(self.schema) for r in self.rows],
+            "rows": [r.as_dict(self.schema) for r in self.select(mode)],
         }
 
 
@@ -149,8 +183,10 @@ def run(
     schema = cfg.schema()
     value_prompt = schema.value_prefix()
 
+    # The walk resolves the pool, not the k that get shown.
+    walk_config = replace(cfg.walk, k=cfg.pool_size)
     candidates, stats = walk_values(
-        lm, lm.encode(value_prompt), cfg.walk, on_progress=on_progress
+        lm, lm.encode(value_prompt), walk_config, on_progress=on_progress
     )
 
     scores: list[BoolScore | None] = [None] * len(candidates)
@@ -177,5 +213,5 @@ def run(
         for i, (c, s) in enumerate(zip(candidates, scores))
     )
     return RunResult(
-        schema=schema, rows=rows, stats=stats, value_prompt=value_prompt
+        schema=schema, rows=rows, stats=stats, value_prompt=value_prompt, k=cfg.k
     )

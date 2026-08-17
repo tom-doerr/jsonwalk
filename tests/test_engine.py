@@ -77,6 +77,46 @@ def test_result_serialises_to_plain_data():
     assert payload["rows"][0]["tokenizations"] == 2
 
 
+def test_pool_is_scored_then_cut_not_cut_then_sorted():
+    # "c" is 2nd most likely and false; "a" is 3rd and less false. With k=2 a
+    # select-then-sort implementation can only ever return {ab, c}; sorting
+    # the whole pool first lets "a" take the second slot under joint/delta.
+    lm = FakeLM(VOCAB, TABLE)
+    cfg = RunConfig(
+        field="n",
+        bool_field="b",
+        preamble="",
+        k=2,
+        walk=WalkConfig(max_tokens=6, child_top_k=10),
+        true_words=(" true",),
+        false_words=(" false",),
+    )
+    result = run(lm, cfg)
+
+    assert len(result.rows) == 3, "the whole pool is kept, not just k"
+    assert [r.value for r in result.select("value")] == ["ab", "c"]
+    assert [r.value for r in result.select("joint")] == ["ab", "a"]
+    assert [r.value for r in result.select("delta")] == ["ab", "a"]
+
+
+def test_pool_size_scales_with_k():
+    cfg = RunConfig(k=20, pool_factor=5)
+    assert cfg.pool_size == 100
+    assert RunConfig(k=20, pool_factor=1).pool_size == 20
+
+
+def test_rank_stays_the_likelihood_rank_after_resorting():
+    # The # column is meant to show where a row came from, so it must not be
+    # renumbered by the display sort.
+    result = do_run()
+    ranks = {r.value: r.rank for r in result.rows}
+    assert [r.rank for r in result.select("joint", k=3)] == [
+        ranks["ab"],
+        ranks["a"],
+        ranks["c"],
+    ]
+
+
 def test_joint_is_value_probability_times_p_true():
     result = do_run()
     row = next(r for r in result.rows if r.value == "ab")
