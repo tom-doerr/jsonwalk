@@ -31,20 +31,22 @@ from textual.widgets import (
     TextArea,
 )
 
-from .engine import RunConfig, RunResult, run
+from .engine import SORT_LABELS, SORT_MODES, RunConfig, RunResult, run, sort_rows
 from .lm import DEFAULT_MODEL
 from .prompt import DEFAULT_PREAMBLE
 from .walk import WalkConfig, WalkStats
 
 COLUMNS = (
     ("#", 3),
-    ("value", 30),
+    ("value", 26),
     ("P(value)", 10),
-    ("tok", 4),
-    ("paths", 6),
+    ("P(v&T)", 9),
     ("D(T-F)", 8),
     ("P(true)", 8),
-    ("bool_mass", 10),
+    ("mass", 6),
+    ("tok", 4),
+    ("paths", 6),
+    ("pre", 4),
 )
 
 HELP = """\
@@ -65,12 +67,31 @@ language model to write it, then reads the answer off the probabilities.
 
 | Column | Meaning |
 | --- | --- |
-| **P(value)** | Probability of the whole string, summed over every way of spelling it in tokens. |
-| **tok** | Tokens in the most likely spelling. Values of different lengths compete fairly. |
-| **paths** | How many distinct tokenizations were merged into this row. |
+| **P(value)** | Probability of the whole string, summed over every way of writing it in tokens. |
+| **P(v&T)** | `P(value)` x `P(true)`: likely **and** true. Usually the ranking you actually want. |
 | **D(T-F)** | `log P(true) - log P(false)`. **The verdict.** `+2.3` means the model is ~10x more willing to write true. |
 | **P(true)** | The same thing as a probability, given a boolean is written at all. |
-| **bool_mass** | `P(true) + P(false)` in absolute terms. **Read this first.** |
+| **mass** | `P(true) + P(false)` in absolute terms. **Read this first.** |
+| **tok** | Tokens in the most likely spelling. Values of different lengths compete fairly. |
+| **paths** | How many token sequences were merged into this row. |
+| **pre** | `*` means this value appears verbatim in your preamble. |
+
+## Sorting (ctrl+s cycles)
+
+1. **value likelihood** - what the model would write.
+2. **P(value) x P(true)** - likely *and* true.
+3. **true/false delta** - strongest verdict first, however unlikely the value.
+
+Only the third one ranks by belief alone. If a list looks arbitrary, it is
+probably sorted by the first: `P(value)` has nothing to do with the boolean.
+
+## Why "paths" is more than 1
+
+Highlight a row and the bottom pane spells them out. Almost always the value
+is spelled one way and the variants are different *closing* tokens: `",`,
+`"}`, `"},` are each single tokens in this vocabulary, so the same value
+finishes several ways. They are summed because they are the same answer. The
+top path usually holds ~97% of it.
 
 ## bool_mass is the sanity check
 
@@ -110,7 +131,7 @@ Screen { layout: vertical; }
 .row Input { height: 1; border: none; padding: 0; background: $boost; }
 
 #status { height: auto; padding: 0 1; color: $text-muted; }
-#detail { height: 2; padding: 0 1; color: $text-muted; }
+#detail { height: 3; padding: 0 1; color: $text-muted; }
 DataTable { height: 1fr; }
 
 HelpScreen, PreambleScreen { align: center middle; }
@@ -197,7 +218,7 @@ class JsonWalkApp(App):
         self.lm = None  # HFLanguageModel, built on first run inside the worker
         self.result: RunResult | None = None
         self.preamble = DEFAULT_PREAMBLE
-        self.sort_by_delta = False
+        self.sort_mode = "value"
         self.busy = False
 
     def compose(self) -> ComposeResult:
@@ -214,7 +235,9 @@ class JsonWalkApp(App):
                 yield Input(value=str(self.k), id="k", type="integer")
         yield Static("", id="status")
         yield DataTable(id="table", cursor_type="row", zebra_stripes=True)
-        yield Static("", id="detail")
+        # markup=False: token pieces are rendered as [Hel][ium]["], and Rich
+        # would parse those brackets as style tags and silently eat them.
+        yield Static("", id="detail", markup=False)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -272,7 +295,8 @@ class JsonWalkApp(App):
     def action_sort(self) -> None:
         if self.result is None:
             return
-        self.sort_by_delta = not self.sort_by_delta
+        i = SORT_MODES.index(self.sort_mode)
+        self.sort_mode = SORT_MODES[(i + 1) % len(SORT_MODES)]
         self.fill_table()
 
     def action_copy(self) -> None:
@@ -340,24 +364,22 @@ class JsonWalkApp(App):
             return
         table = self.query_one("#table", DataTable)
         table.clear()
-        rows = list(self.result.rows)
-        if self.sort_by_delta:
-            rows.sort(key=lambda r: -(r.bool_score.delta if r.bool_score else 0.0))
-        for row in rows:
+        for row in sort_rows(self.result.rows, self.sort_mode):
             b = row.bool_score
             table.add_row(
                 str(row.rank),
                 row.value,
                 f"{row.candidate.prob:.5f}",
-                str(len(row.candidate.best_path)),
-                str(row.candidate.n_paths),
+                f"{row.joint_prob:.5f}" if b else "-",
                 f"{b.delta:+.2f}" if b else "-",
                 f"{b.p_true:.2f}" if b else "-",
                 f"{b.bool_mass:.3f}" if b else "-",
+                str(len(row.candidate.best_path)),
+                str(row.candidate.n_paths),
+                "*" if row.echoed else "",
                 key=str(row.rank),
             )
-        order = "true/false delta" if self.sort_by_delta else "value likelihood"
-        self.sub_title = f"sorted by {order}"
+        self.sub_title = f"sorted by {SORT_LABELS[self.sort_mode]}"
 
     @on(DataTable.RowHighlighted)
     def _on_row(self, event: DataTable.RowHighlighted) -> None:
@@ -368,12 +390,32 @@ class JsonWalkApp(App):
         if row is None:
             return
         detail = json.dumps(row.as_object(self.result.schema), ensure_ascii=False)
+        if row.echoed:
+            detail += "   [appears in the preamble]"
         if row.bool_score is not None:
             words = "  ".join(
                 f"{w}={lp:.2f}" for w, lp in row.bool_score.per_word.items()
             )
             detail += f"\n{words}"
+        detail += "\n" + self.describe_paths(row)
         self.query_one("#detail", Static).update(detail)
+
+    def describe_paths(self, row) -> str:
+        """Spell out the tokenizations behind the `paths` count.
+
+        Nearly always the value body is tokenized one way and the variants are
+        different *closing* tokens -- `",` `"}` `"},` are each single tokens --
+        so this is what makes that visible rather than mysterious.
+        """
+        toks = row.candidate.tokenizations
+        if self.lm is None or not toks:
+            return ""
+        parts = []
+        for t in toks[:3]:
+            pieces = "".join(f"[{self.lm.decode([i])}]" for i in t.tokens)
+            parts.append(f"{t.prob / row.candidate.prob:.0%} {pieces}")
+        more = f"  +{len(toks) - 3} more" if len(toks) > 3 else ""
+        return f"paths: {'  '.join(parts)}{more}"
 
 
 def main(argv: list[str] | None = None) -> int:

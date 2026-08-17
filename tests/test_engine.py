@@ -1,7 +1,10 @@
 import math
+from dataclasses import replace
 
+import pytest
 from fake_lm import FakeLM
-from jsonwalk.engine import RunConfig, run
+from jsonwalk.engine import RunConfig, run, sort_rows
+from jsonwalk.score import BoolScore
 from jsonwalk.walk import WalkConfig
 
 VOCAB = ['{"n": "', "a", "b", "ab", "c", '"', '", "b":', " true", " false"]
@@ -72,6 +75,62 @@ def test_result_serialises_to_plain_data():
     assert payload["prompt"] == '{"n": "'
     assert payload["rows"][0]["object"] == {"n": "ab", "b": True}
     assert payload["rows"][0]["tokenizations"] == 2
+
+
+def test_joint_is_value_probability_times_p_true():
+    result = do_run()
+    row = next(r for r in result.rows if r.value == "ab")
+    p_true = 0.60 / (0.60 + 0.20)
+    assert math.isclose(row.joint_prob, 0.45 * p_true, rel_tol=1e-9)
+
+
+def test_joint_sort_reranks_a_likely_but_false_value():
+    # "c" is the second most likely value but the model calls it false, so
+    # ranking by "likely AND true" must drop it below the less likely "a".
+    result = do_run()
+    by_value = sort_rows(result.rows, "value")
+    by_joint = sort_rows(result.rows, "joint")
+    assert [r.value for r in by_value] == ["ab", "c", "a"]
+    assert [r.value for r in by_joint] == ["ab", "a", "c"]
+
+
+def test_delta_sort_differs_from_both():
+    result = do_run()
+    assert [r.value for r in sort_rows(result.rows, "delta")] == ["ab", "a", "c"]
+
+
+def test_unknown_sort_mode_is_rejected():
+    with pytest.raises(ValueError):
+        sort_rows(do_run().rows, "alphabetical")
+
+
+def test_joint_survives_a_confidently_false_verdict():
+    # log(sigmoid(-800)) must not blow up; a plain log(p_true) would.
+    score = BoolScore(logprob_true=-800.0, logprob_false=0.0, per_word={})
+    assert score.p_true == 0.0
+    assert math.isclose(score.log_p_true, -800.0, abs_tol=1e-6)
+
+
+def test_values_echoed_from_the_preamble_are_flagged():
+    lm = FakeLM(VOCAB, TABLE)
+    cfg = RunConfig(
+        field="n",
+        bool_field="b",
+        preamble="",
+        walk=WalkConfig(k=10, max_tokens=6, child_top_k=10),
+        true_words=(" true",),
+        false_words=(" false",),
+    )
+    assert not any(r.echoed for r in run(lm, cfg).rows)
+
+    # Same walk, but now "ab" also sits in the preamble: that is exactly the
+    # "few-shot example echoed back as a candidate" case the flag exists for.
+    shifted = FakeLM(VOCAB, {("ab", *state): dist for state, dist in TABLE.items()})
+    flagged = {
+        r.value: r.echoed for r in run(shifted, replace(cfg, preamble="ab")).rows
+    }
+    assert flagged["ab"] is True
+    assert flagged["c"] is False
 
 
 def test_bool_scoring_can_be_switched_off():

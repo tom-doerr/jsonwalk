@@ -21,7 +21,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .lm import LanguageModel
-from .logmath import logsumexp, sigmoid
+from .logmath import log_sigmoid, logsumexp, sigmoid
 
 # The leading space belongs to the *word*, not the prompt. If the prompt ended
 # with ": " the tokenizer would merge that space into " true" when it encoded
@@ -53,6 +53,11 @@ class BoolScore:
     def p_true(self) -> float:
         """Probability of true *given* the model writes a boolean at all."""
         return sigmoid(self.delta)
+
+    @property
+    def log_p_true(self) -> float:
+        """``log(p_true)``, safe when the verdict is confidently false."""
+        return log_sigmoid(self.delta)
 
     @property
     def bool_mass(self) -> float:

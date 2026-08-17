@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 
 from . import __version__
-from .engine import RunConfig, RunResult, run
+from .engine import SORT_LABELS, SORT_MODES, RunConfig, RunResult, run, sort_rows
 from .lm import DEFAULT_MODEL
 from .prompt import DEFAULT_PREAMBLE, SCHEMA_ONLY_PREAMBLE
 from .walk import WalkConfig
@@ -55,6 +56,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="use the no-examples preamble (weaker verdicts, no echoed values)",
     )
+    p.add_argument(
+        "--sort",
+        choices=SORT_MODES,
+        default="value",
+        help=(
+            "value: most likely values (default). joint: P(value) x P(true), "
+            "i.e. likely AND true. delta: strongest verdict first."
+        ),
+    )
     p.add_argument("--no-bool", action="store_true", help="skip boolean scoring")
     p.add_argument("--json", action="store_true", help="emit JSON instead of a table")
     p.add_argument(
@@ -83,24 +93,30 @@ def resolve_preamble(args: argparse.Namespace) -> str:
     return DEFAULT_PREAMBLE
 
 
-def format_table(result: RunResult) -> str:
+def format_table(result: RunResult, sort: str = "value", width: int = 0) -> str:
+    # Numeric columns are fixed; the value column takes whatever is left, so
+    # the table fits an 80-column terminal and uses a wide one.
+    fixed = len("  #   P(value)   P(v&T)   D(T-F) P(true)  mass tok paths pre")
+    width = width or shutil.get_terminal_size((100, 24)).columns
+    vw = max(12, min(40, width - fixed))
+
     head = (
-        f"{'#':>3}  {'value':<32} {'P(value)':>9} {'tok':>3} {'paths':>5} "
-        f"{'D(T-F)':>7} {'P(true)':>7} {'bool_mass':>9}"
+        f"{'#':>3}  {'value':<{vw}} {'P(value)':>9} {'P(v&T)':>8} "
+        f"{'D(T-F)':>7} {'P(true)':>7} {'mass':>5} {'tok':>3} {'paths':>5} pre"
     )
     lines = [head, "-" * len(head)]
-    for row in result.rows:
+    for row in sort_rows(result.rows, sort):
         b = row.bool_score
-        cells = (
-            f"{row.rank:>3}  {row.value[:32]:<32} {row.candidate.prob:>9.5f} "
-            f"{len(row.candidate.best_path):>3} {row.candidate.n_paths:>5} "
-        )
+        cells = f"{row.rank:>3}  {row.value[:vw]:<{vw}} {row.candidate.prob:>9.5f} "
         if b is None:
-            lines.append(cells + f"{'-':>7} {'-':>7} {'-':>9}")
+            cells += f"{'-':>8} {'-':>7} {'-':>7} {'-':>5} "
         else:
-            lines.append(
-                cells + f"{b.delta:>+7.2f} {b.p_true:>7.2f} {b.bool_mass:>9.3f}"
+            cells += (
+                f"{row.joint_prob:>8.5f} {b.delta:>+7.2f} "
+                f"{b.p_true:>7.2f} {b.bool_mass:>5.3f} "
             )
+        cells += f"{len(row.candidate.best_path):>3} {row.candidate.n_paths:>5}"
+        lines.append(cells + ("   *" if row.echoed else ""))
     s = result.stats
     lines.append("")
     lines.append(
@@ -110,6 +126,12 @@ def format_table(result: RunResult) -> str:
         + ("; search exhausted" if s.exhausted else "")
         + ("; top-k provably complete" if s.complete_top_k else "")
     )
+    echoed = [r.value for r in result.rows if r.echoed]
+    if echoed:
+        lines.append(
+            f"* {len(echoed)} value(s) appear verbatim in the preamble "
+            f"({', '.join(echoed[:4])}) -- few-shot examples get echoed back."
+        )
     if result.rows and result.rows[0].bool_score is not None:
         worst = min(r.bool_score.bool_mass for r in result.rows)
         if worst < 0.5:
@@ -144,12 +166,18 @@ def main(argv: list[str] | None = None) -> int:
     result = run(lm, config)
 
     if args.objects:
-        for row in result.rows:
+        for row in sort_rows(result.rows, args.sort):
             print(json.dumps(row.as_object(result.schema), ensure_ascii=False))
     elif args.json:
-        print(json.dumps(result.as_dict(), ensure_ascii=False, indent=2))
+        payload = result.as_dict()
+        payload["sort"] = args.sort
+        payload["rows"] = [
+            r.as_dict(result.schema) for r in sort_rows(result.rows, args.sort)
+        ]
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
-        print(format_table(result))
+        print(format_table(result, sort=args.sort))
+        print(f"sorted by {SORT_LABELS[args.sort]}", file=sys.stderr)
     return 0
 
 

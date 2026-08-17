@@ -45,10 +45,30 @@ class Row:
     candidate: ValueCandidate
     share: float
     bool_score: BoolScore | None
+    echoed: bool = False
+    """The value appears verbatim in the preamble, which is why it is here."""
 
     @property
     def value(self) -> str:
         return self.candidate.value
+
+    @property
+    def joint_logprob(self) -> float:
+        """log P(value) + log P(true | value).
+
+        The probability that this is the value *and* the answer is yes. It is
+        the only ranking that combines "would the model say this" with "does
+        the model think it is true", which is usually the question being
+        asked. Uses the renormalised p_true, so a prompt where the model is
+        lukewarm about writing booleans at all does not distort it.
+        """
+        if self.bool_score is None:
+            return self.candidate.logprob
+        return self.candidate.logprob + self.bool_score.log_p_true
+
+    @property
+    def joint_prob(self) -> float:
+        return math.exp(self.joint_logprob)
 
     def as_object(self, schema: Schema) -> dict[str, object]:
         """The JSON object this row stands for."""
@@ -64,13 +84,42 @@ class Row:
             "share": self.share,
             "tokenizations": self.candidate.n_paths,
             "tokens": len(self.candidate.best_path),
+            "from_preamble": self.echoed,
         }
         if self.bool_score is not None:
             out["delta_true_false"] = self.bool_score.delta
             out["p_true"] = self.bool_score.p_true
             out["bool_mass"] = self.bool_score.bool_mass
+            out["joint_prob"] = self.joint_prob
             out["per_word_logprob"] = self.bool_score.per_word
         return out
+
+
+SORT_MODES = ("value", "joint", "delta")
+
+SORT_LABELS = {
+    "value": "value likelihood",
+    "joint": "P(value) x P(true)",
+    "delta": "true/false delta",
+}
+
+
+def sort_rows(rows: "tuple[Row, ...] | list[Row]", mode: str) -> list[Row]:
+    """Order rows by one of the three meaningful rankings.
+
+    ``value`` answers "what would the model write here", ``delta`` answers
+    "what does it most believe", and ``joint`` answers "what is both likely
+    and true" -- which is usually the actual question.
+    """
+    if mode not in SORT_MODES:
+        raise ValueError(f"unknown sort mode {mode!r}; pick one of {SORT_MODES}")
+    if mode == "value":
+        return sorted(rows, key=lambda r: -r.candidate.logprob)
+    if mode == "joint":
+        return sorted(rows, key=lambda r: -r.joint_logprob)
+    return sorted(
+        rows, key=lambda r: -(r.bool_score.delta if r.bool_score else 0.0)
+    )
 
 
 @dataclass(frozen=True)
@@ -116,12 +165,14 @@ def run(
         )
 
     total = math.exp(stats.found_logmass) if stats.found_logmass > NEG_INF else 0.0
+    preamble_text = schema.rendered_preamble()
     rows = tuple(
         Row(
             rank=i + 1,
             candidate=c,
             share=(c.prob / total) if total > 0 else 0.0,
             bool_score=s,
+            echoed=bool(c.value) and c.value in preamble_text,
         )
         for i, (c, s) in enumerate(zip(candidates, scores))
     )

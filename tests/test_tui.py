@@ -10,7 +10,7 @@ import asyncio
 from fake_lm import FakeLM
 from jsonwalk.engine import RunConfig, run
 from jsonwalk.prompt import DEFAULT_PREAMBLE
-from jsonwalk.tui import HelpScreen, JsonWalkApp, PreambleScreen
+from jsonwalk.tui import COLUMNS, HelpScreen, JsonWalkApp, PreambleScreen
 from jsonwalk.walk import WalkConfig
 from test_engine import TABLE, VOCAB
 from textual.widgets import DataTable, Input, Static, TextArea
@@ -42,7 +42,7 @@ def test_app_mounts_with_all_expected_widgets():
     async def check(app, pilot):
         assert app.query_one("#field", Input).value == "startup_name"
         assert app.query_one("#bool_field", Input).value == "good_sounding_name"
-        assert len(app.query_one("#table", DataTable).columns) == 8
+        assert len(app.query_one("#table", DataTable).columns) == len(COLUMNS)
 
     drive(check)
 
@@ -116,20 +116,83 @@ def test_results_render_one_row_per_value():
     drive(check)
 
 
-def test_sort_toggle_reorders_by_delta():
+def test_sort_cycles_through_all_three_modes():
     result = make_result()
 
     async def check(app, pilot):
         app.show_result(result)
-        app.action_sort()
+        assert app.sort_mode == "value"
+        for expected in ("joint", "delta", "value"):
+            app.action_sort()
+            await pilot.pause()
+            assert app.sort_mode == expected
+        # the table stays populated across every mode
+        assert app.query_one("#table", DataTable).row_count == len(result.rows)
+
+    drive(check)
+
+
+def test_delta_sort_sinks_the_most_false_value():
+    result = make_result()
+
+    async def check(app, pilot):
+        app.show_result(result)
+        app.sort_mode = "delta"
+        app.fill_table()
         await pilot.pause()
         table = app.query_one("#table", DataTable)
-        first = table.get_row_at(0)
-        # "ab" has the highest delta as well as the highest probability, so
-        # check the tail instead: "c" is the most-false and must sink.
-        last = table.get_row_at(table.row_count - 1)
-        assert first[1] == "ab"
-        assert last[1] == "c"
+        assert table.get_row_at(0)[1] == "ab"
+        assert table.get_row_at(table.row_count - 1)[1] == "c"
+
+    drive(check)
+
+
+def test_detail_pane_spells_out_the_token_paths():
+    # Regression: the pieces are rendered as [ab]["] and Rich markup parsed
+    # those brackets as style tags, so the detail line silently lost them.
+    result = make_result()
+
+    async def check(app, pilot):
+        app.lm = FakeLM(VOCAB, TABLE)
+        app.show_result(result)
+        await pilot.pause()
+        app.query_one("#table", DataTable).move_cursor(row=0)
+        await pilot.pause()
+        detail = str(app.query_one("#detail", Static).render())
+        assert "paths:" in detail
+        assert "[ab]" in detail and '["]' in detail
+        assert "[appears in the preamble]" not in detail  # not echoed here
+
+    drive(check)
+
+
+def test_detail_pane_marks_a_value_that_came_from_the_preamble():
+    shifted = FakeLM(VOCAB, {("ab", *s): d for s, d in TABLE.items()})
+    result = run(
+        shifted,
+        RunConfig(
+            field="n",
+            bool_field="b",
+            preamble="ab",
+            walk=WalkConfig(k=10, max_tokens=6, child_top_k=10),
+            true_words=(" true",),
+            false_words=(" false",),
+        ),
+    )
+
+    async def check(app, pilot):
+        app.lm = shifted
+        app.show_result(result)
+        await pilot.pause()
+        table = app.query_one("#table", DataTable)
+        row = next(
+            i for i in range(table.row_count) if table.get_row_at(i)[1] == "ab"
+        )
+        table.move_cursor(row=row)
+        await pilot.pause()
+        assert "appears in the preamble" in str(
+            app.query_one("#detail", Static).render()
+        )
 
     drive(check)
 

@@ -16,19 +16,17 @@ You name the boolean field, jsonwalk scores every value with it. Ask for
 `startup_name` + `good_sounding_name` and you get a ranked list of plausible
 startup names, each with the model's opinion of whether it sounds good.
 
-```
-$ jsonwalk run city_name is_in_europe -k 6
+```console
+$ jsonwalk city_name is_in_europe -k 6
+  #  value            P(value)   P(v&T)  D(T-F) P(true)  mass tok paths pre
+  1  New York          0.05515  0.01483   -1.00    0.27 0.994   3     6
+  2  Paris             0.04304  0.03667   +1.75    0.85 0.995   2     9
+  3  London            0.03343  0.02793   +1.63    0.84 0.995   2     6
+  4  Los Angeles       0.03265  0.00800   -1.13    0.25 0.994   3     5
+  5  Berlin            0.01789  0.01524   +1.75    0.85 0.995   2     7
+  6  Chicago           0.01779  0.00724   -0.38    0.41 0.994   2     7
 
-  #  value                             P(value) tok paths  D(T-F) P(true) bool_mass
------------------------------------------------------------------------------------
-  1  New York                           0.05515   3     6   -1.00    0.27     0.994
-  2  Paris                              0.04304   2     9   +1.75    0.85     0.995
-  3  London                             0.03343   2     6   +1.63    0.84     0.995
-  4  Los Angeles                        0.03265   3     5   -1.13    0.25     0.994
-  5  Berlin                             0.01789   2     7   +1.75    0.85     0.995
-  6  Chicago                            0.01779   2     7   -0.38    0.41     0.994
-
-266 distinct values seen, covering 43.1% of the probability mass; 145 expansions; top-k provably complete
+266 distinct values seen, covering 43.1% of the probability mass; 145 expansions
 ```
 
 Nobody told it which cities are in Europe. The sign of `D(T-F)` is the model's
@@ -64,33 +62,84 @@ walker scans inside each candidate token rather than waiting for a lone quote.
 ### Merging tokenizations
 
 The same string is often reachable by several different token sequences.
-In the run above `Paris` arrived **9 ways** and `Berlin` **7** (see the
-`paths` column). Those are not competing answers — they are one answer spelled
-differently, so their probabilities are summed (`logsumexp`), not ranked
-against each other.
+The same value is reachable by several token sequences, and they are summed
+(`logsumexp`) rather than ranked against each other: they are one answer, not
+competing ones. It is worth being precise about what those paths actually are,
+because it is not what you would guess. Dumping them for `Iron`:
 
-This changes results, not just bookkeeping: a value whose mass is split across
-several tokenizations can lose to a rival on any single path and still win
-once merged.
+```
+0.035110 (97.6%)  ['Iron', '",']
+0.000442 ( 1.2%)  ['Iron', '"},']
+0.000415 ( 1.2%)  ['Iron', '"}']
+0.000013 ( 0.0%)  ['Iron', '"']
+0.000002 ( 0.0%)  ['Iron', '","']
+0.000002 ( 0.0%)  ['Iron', '"],']
+```
 
-## The three numbers
+The body is tokenized identically every time. What varies is the **closing
+token** — `",` `"}` `"},` `"` are each single tokens here, so the model shuts
+the string and emits the following punctuation in one step, several different
+ways. Genuine re-spellings of the body happen but are rare and low-probability,
+because they mean deviating from the greedy BPE merge.
+
+So merging is required for a correct `P(value)` — without it `Iron` is
+understated by ~2.4% — but on this model the top path carries ~97% of a value's
+mass, so it seldom reorders the table. It matters most for values whose
+segmentation is genuinely ambiguous. Highlight a row in the TUI and the bottom
+pane shows its paths.
+
+## The columns
 
 | Column | Meaning |
 | --- | --- |
-| `P(value)` | Joint probability of the whole string, merged over tokenizations. |
+| `P(value)` | Probability of the whole string, merged over tokenizations. |
+| `P(v&T)` | `P(value)` × `P(true)` — likely **and** true. See sorting below. |
 | `D(T-F)` | `log P(true…) − log P(false…)`. A log-odds: `+2.3` means the model is ~10× more willing to write `true`. **This is the judgement.** |
 | `P(true)` | `sigmoid(D)` — the verdict as a probability, *given* the model writes a boolean at all. |
-| `bool_mass` | `P(true…) + P(false…)` in absolute terms. **This is the sanity check.** |
+| `mass` | `P(true…) + P(false…)` in absolute terms. **This is the sanity check.** |
+| `tok` / `paths` | Tokens in the best spelling; token sequences merged into the row. |
+| `pre` | `*` — the value appears verbatim in your preamble. |
 
 `true` and `True` are pooled, as are `false` and `False`; a spelling
 preference is not an opinion.
 
-`bool_mass` is the column to look at first. If it is low, the model did not
-intend to write a boolean in that slot at all, and the delta is a ratio
-between two things it never wanted to say — the fix is the preamble, not more
-search. With no preamble the model's favourite continuation in the boolean
-slot is a *digit*: it reads `good_sounding_name` as numeric. The CLI and TUI
-both warn when `bool_mass` drops below 0.5.
+`mass` is the column to look at first. If it is low, the model did not intend
+to write a boolean in that slot at all, and the delta is a ratio between two
+things it never wanted to say — the fix is the preamble, not more search. With
+no preamble the model's favourite continuation in the boolean slot is a
+*digit*: it reads `good_sounding_name` as numeric. The CLI and TUI both warn
+when it drops below 0.5.
+
+## Sorting: likely, true, or both
+
+`P(value)` says what the model would *write*, which has nothing to do with the
+boolean — so a table in that order looks arbitrary if you read it as a
+judgement. Three orders, `--sort` on the CLI and `ctrl+s` in the TUI:
+
+| Mode | Ranks by | Answers |
+| --- | --- | --- |
+| `value` (default) | `P(value)` | What would it write here? |
+| `joint` | `P(value)` × `P(true)` | What is likely **and** true? |
+| `delta` | `D(T-F)` | What does it most believe, however unlikely? |
+
+`joint` is usually the one you want. On `element` / `is_metal` the default
+order interleaves metals and nonmetals by nothing but word frequency, while
+`--sort joint` puts **all eight metals above all four nonmetals**:
+
+```console
+$ jsonwalk element is_metal -k 14 --sort joint
+  2  Iron         0.03599  0.03007   +1.62    0.84
+  4  Copper       0.02933  0.02653   +2.25    0.90
+  5  Sodium       0.01974  0.01785   +2.25    0.90
+  6  Gold         0.01756  0.01401   +1.38    0.80
+  ...
+  1  Hydrogen     0.06001  0.00798   -1.87    0.13   <- most likely value, but not a metal
+  3  Helium       0.03297  0.00097   -3.50    0.03
+  7  Carbon       0.01710  0.00039   -3.75    0.02
+```
+
+The `#` column keeps the original likelihood rank, so you can see how far each
+row moved.
 
 ## The preamble matters more than anything else
 
@@ -98,7 +147,7 @@ This is a base model completing a document, so the preamble decides both which
 values appear and whether the boolean slot means anything. Measured on
 `Qwen3.5-0.8B-Base`:
 
-| Preamble | `bool_mass` | `city_name` returns |
+| Preamble | `mass` | `city_name` returns |
 | --- | --- | --- |
 | none | 0.04 – 0.20 | — |
 | schema comment (`--schema-only-preamble`) | 0.72 – 0.80 | cities, weak verdicts (New York only +0.07) |
@@ -106,11 +155,19 @@ values appear and whether the boolean slot means anything. Measured on
 | examples from unrelated domains (default) | 0.82 – 0.99 | cities, sharp verdicts |
 
 The trap in row three is worth spelling out: worked examples buy the highest
-`bool_mass` of all, but if they use the field you are asking about, they
-hijack it — ask for `city_name` with startup examples and you get startups.
-The default therefore uses examples about films and chemical elements, which
-teach the *shape* of the object without supplying its subject. A third
-example made both the separation and the mass worse.
+`mass` of all, but if they use the field you are asking about, they hijack it
+— ask for `city_name` with startup examples and you get startups. The default
+therefore uses examples about films and chemical elements, which teach the
+*shape* of the object without supplying its subject. A third example made both
+the separation and the mass worse.
+
+**Examples still get echoed back as candidates, and the `pre` column marks
+it.** The default preamble names Helium, so asking for `element` puts Helium
+at rank 3 — delete that example line and Helium leaves the top 14 entirely.
+But the same run then degrades to `water, person, a, element, Nile` (`Nile`
+being an echo of the *other* example): the chemistry line is what makes
+`element` produce elements at all. The echo is the price of the priming, so
+the tool flags it rather than pretending otherwise.
 
 `{field}` and `{bool_field}` in a preamble expand to the field names in use,
 if you do want same-domain examples for a fixed task.
@@ -186,7 +243,7 @@ Run `jsonwalk` with no arguments. Three stacked inputs, then the results:
 | Key | Action |
 | --- | --- |
 | `ctrl+r` / `enter` | Run |
-| `ctrl+s` | Sort by likelihood or by verdict |
+| `ctrl+s` | Cycle sort: likelihood / likely-and-true / verdict |
 | `ctrl+y` | Copy every row as JSON |
 | `F2` | Edit the preamble |
 | `F1` | Help: what `k` is, what every column means |

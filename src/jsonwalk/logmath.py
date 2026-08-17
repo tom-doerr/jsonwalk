@@ -29,3 +29,15 @@ def sigmoid(x: float) -> float:
         return 1.0 / (1.0 + math.exp(-x))
     e = math.exp(x)
     return e / (1.0 + e)
+
+
+def log_sigmoid(x: float) -> float:
+    """log(sigmoid(x)) without ever forming sigmoid(x).
+
+    Needed because a confidently-false verdict makes sigmoid underflow to 0
+    and log(0) blow up, exactly where a joint score wants a large negative
+    number instead.
+    """
+    if x >= 0:
+        return -math.log1p(math.exp(-x))
+    return x - math.log1p(math.exp(x))

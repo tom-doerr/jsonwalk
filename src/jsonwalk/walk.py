@@ -22,6 +22,7 @@ import heapq
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from dataclasses import field as dc_field
 
 from .lm import LanguageModel
 from .logmath import NEG_INF, logsumexp
@@ -33,18 +34,42 @@ _CONTROL_CHARS = frozenset(chr(c) for c in range(0x20))
 
 
 @dataclass(frozen=True)
+class Tokenization:
+    """One token sequence that produces a given value.
+
+    ``tokens`` includes the token that closed the string, which is often not a
+    bare quote: `",` and `"}` are single tokens, so the same value legitimately
+    finishes several different ways.
+    """
+
+    tokens: tuple[int, ...]
+    logprob: float
+
+    @property
+    def prob(self) -> float:
+        return math.exp(self.logprob)
+
+
+@dataclass(frozen=True)
 class ValueCandidate:
     """One distinct string value, with every tokenization of it merged."""
 
     value: str
     raw: str
     logprob: float
-    n_paths: int
-    best_path: tuple[int, ...]
+    tokenizations: tuple[Tokenization, ...]
 
     @property
     def prob(self) -> float:
         return math.exp(self.logprob)
+
+    @property
+    def n_paths(self) -> int:
+        return len(self.tokenizations)
+
+    @property
+    def best_path(self) -> tuple[int, ...]:
+        return self.tokenizations[0].tokens if self.tokenizations else ()
 
 
 @dataclass
@@ -107,19 +132,17 @@ class _Merged:
     reads every total on every batch.
     """
 
-    n_paths: int = 0
     total: float = NEG_INF
     best_logprob: float = NEG_INF
     best_raw: str = ""
-    best_path: tuple[int, ...] = ()
+    paths: list[Tokenization] = dc_field(default_factory=list)
 
     def add(self, logprob: float, raw: str, path: tuple[int, ...]) -> None:
-        self.n_paths += 1
         self.total = logsumexp((self.total, logprob))
+        self.paths.append(Tokenization(tokens=path, logprob=logprob))
         if logprob > self.best_logprob:
             self.best_logprob = logprob
             self.best_raw = raw
-            self.best_path = path
 
 
 def _top_k_complete(
@@ -222,8 +245,9 @@ def walk_values(
             value=value,
             raw=m.best_raw,
             logprob=m.total,
-            n_paths=m.n_paths,
-            best_path=m.best_path,
+            tokenizations=tuple(
+                sorted(m.paths, key=lambda t: -t.logprob)
+            ),
         )
         for value, m in merged.items()
     ]
