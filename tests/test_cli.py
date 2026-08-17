@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 from jsonwalk import __main__ as entry
-from jsonwalk.cli import build_parser, resolve_preamble
+from jsonwalk.cli import build_parser, resolve_preamble, resolve_sort
 from jsonwalk.prompt import DEFAULT_PREAMBLE, PREAMBLE_STYLES
 
 SRC = str(Path(__file__).resolve().parents[1] / "src")
@@ -38,6 +38,20 @@ def test_conflicting_preamble_sources_are_rejected():
 def test_empty_preamble_is_honoured_not_treated_as_unset():
     # `--preamble ""` is a real choice: no preamble at all.
     assert resolve_preamble(parse(["--preamble", ""])) == ""
+
+
+def test_sort_defaults_to_signal():
+    assert resolve_sort(parse([])) == "signal"
+    assert resolve_sort(parse(["--sort", "value"])) == "value"
+
+
+def test_no_bool_falls_back_to_value_and_refuses_verdict_sorts():
+    # Silently sorting by a verdict that was never computed would be worse
+    # than an error, so the impossible combination is rejected outright.
+    assert resolve_sort(parse(["--no-bool"])) == "value"
+    for mode in ("signal", "joint", "delta"):
+        with pytest.raises(SystemExit):
+            resolve_sort(parse(["--no-bool", "--sort", mode]))
 
 
 def test_bare_arguments_go_to_the_cli(monkeypatch):

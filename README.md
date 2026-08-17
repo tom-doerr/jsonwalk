@@ -109,33 +109,68 @@ no preamble the model's favourite continuation in the boolean slot is a
 *digit*: it reads `good_sounding_name` as numeric. The CLI and TUI both warn
 when it drops below 0.5.
 
-## Sorting: likely, true, or both
+## Sorting
 
-`P(value)` says what the model would *write*, which has nothing to do with the
-boolean — so a table in that order looks arbitrary if you read it as a
-judgement. Three orders, `--sort` on the CLI and `ctrl+s` in the TUI:
+`--sort` on the CLI, `ctrl+s` cycles in the TUI.
 
 | Mode | Ranks by | Answers |
 | --- | --- | --- |
-| `value` (default) | `P(value)` | What would it write here? |
-| `joint` | `P(value)` × `P(true)` | What is likely **and** true? |
+| `signal` (default) | `P(value)` × `D(T-F)` | What is likely **and** true? |
+| `joint` | `P(value)` × `P(true)` | Probability of the whole object. |
+| `value` | `P(value)` | What would it write here? |
 | `delta` | `D(T-F)` | What does it most believe, however unlikely? |
 
-`joint` is usually the one you want. On `element` / `is_metal` the default
-order interleaves metals and nonmetals by nothing but word frequency, while
-`--sort joint` puts **all eight metals above all four nonmetals**:
+Scored against hand-labelled ground truth over the whole 100-candidate pool.
+`precision@20` counts labelled rows in the displayed list; `AUC` is the
+fraction of (true, false) pairs the full ordering gets the right way round:
+
+| Mode | `element`/`is_metal` | `city_name`/`is_in_europe` |
+| --- | --- | --- |
+| `signal` | **1.00 / 1.000** | **1.00 / 1.000** |
+| `joint` | 0.94 / 0.966 | 0.41 / 0.597 |
+| `value` | 0.68 / 0.664 | 0.35 / 0.364 |
+| `delta` | 1.00 / 1.000 | 1.00 / 1.000 |
+
+Sorting by likelihood alone interleaves metals and nonmetals by nothing but
+word frequency; `signal` puts **all the metals above all the nonmetals**:
 
 ```console
-$ jsonwalk element is_metal -k 14 --sort joint
-  2  Iron         0.03599  0.03007   +1.62    0.84
-  4  Copper       0.02933  0.02653   +2.25    0.90
-  5  Sodium       0.01974  0.01785   +2.25    0.90
-  6  Gold         0.01756  0.01401   +1.38    0.80
+$ jsonwalk element is_metal -k 14
+  4  Copper       +0.0660  0.02933   +2.25    0.90
+  2  Iron         +0.0583  0.03599   +1.62    0.84
+  5  Sodium       +0.0444  0.01974   +2.25    0.90
   ...
-  1  Hydrogen     0.06001  0.00798   -1.87    0.13   <- most likely value, but not a metal
-  3  Helium       0.03297  0.00097   -3.50    0.03
-  7  Carbon       0.01710  0.00039   -3.75    0.02
+  7  Carbon       -0.0641  0.01710   -3.75    0.02
+  1  Hydrogen     -0.1122  0.06001   -1.87    0.13  <- most likely value, and rejected
+  3  Helium       -0.1154  0.03297   -3.50    0.03
 ```
+
+### Why the signed delta, and not `P(true)`
+
+`P(true)` is `sigmoid(D)`, and it **saturates**: +1.4 and +2.3 nats are only
+0.80 versus 0.90, a factor of 1.1, while `P(value)` varies by 10× across a
+list. So in `joint` the likelihood swamps the verdict — which is how "cities
+in Europe" ends up with New York, Los Angeles, Chicago and Tokyo in its top
+20, at precision 0.41.
+
+Multiplying by the raw delta instead keeps its **sign**, and that changes the
+structure of the ranking: every positive score beats every negative one, so
+`P(value)` orders *within* a verdict and never across it. A value the model
+rejects cannot float up on popularity — it sinks in proportion to how common
+it is, which puts the most likely false value at the very bottom.
+
+`delta` alone separates just as perfectly, being sign-carrying too. What
+`P(value)` buys is the ordering *inside* the true group, regularising away the
+rare and the malformed:
+
+```
+signal  Paris, London, Berlin, Rome, Barcelona
+delta   Lyon, Bordeaux, Rome, Dublin, Hamburg     <- equally European, less useful
+```
+
+It is a ranking heuristic, not a probability: multiplying a probability by a
+log-odds has no distributional meaning. `joint` is the one with a clean
+interpretation, and it is kept for when that matters.
 
 The `#` column keeps the original likelihood rank, so you can see how far each
 row moved.

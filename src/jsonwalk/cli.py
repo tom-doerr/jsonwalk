@@ -8,7 +8,15 @@ import shutil
 import sys
 
 from . import __version__
-from .engine import SORT_LABELS, SORT_MODES, RunConfig, RunResult, run
+from .engine import (
+    BOOL_SORT_MODES,
+    DEFAULT_SORT,
+    SORT_LABELS,
+    SORT_MODES,
+    RunConfig,
+    RunResult,
+    run,
+)
 from .lm import DEFAULT_MODEL
 from .prompt import DEFAULT_PREAMBLE, PREAMBLE_STYLES
 from .walk import WalkConfig
@@ -72,10 +80,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--sort",
         choices=SORT_MODES,
-        default="value",
+        default=None,
         help=(
-            "value: most likely values (default). joint: P(value) x P(true), "
-            "i.e. likely AND true. delta: strongest verdict first."
+            "signal: P(value) x D(T-F), likely and true, false values sink "
+            "(default). joint: P(value) x P(true). value: most likely values. "
+            "delta: strongest verdict first, however unlikely."
         ),
     )
     p.add_argument("--no-bool", action="store_true", help="skip boolean scoring")
@@ -86,6 +95,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="emit one JSON object per line, nothing else",
     )
     return p
+
+
+def resolve_sort(args: argparse.Namespace) -> str:
+    """Pick the sort mode, refusing combinations that cannot mean anything."""
+    if args.no_bool:
+        if args.sort in BOOL_SORT_MODES:
+            raise SystemExit(f"--sort {args.sort} needs the boolean; drop --no-bool")
+        return "value"
+    return args.sort or DEFAULT_SORT
 
 
 def resolve_preamble(args: argparse.Namespace) -> str:
@@ -108,26 +126,30 @@ def resolve_preamble(args: argparse.Namespace) -> str:
     return DEFAULT_PREAMBLE
 
 
-def format_table(result: RunResult, sort: str = "value", width: int = 0) -> str:
+def format_table(
+    result: RunResult, sort: str = DEFAULT_SORT, width: int = 0
+) -> str:
     # Numeric columns are fixed; the value column takes whatever is left, so
     # the table fits an 80-column terminal and uses a wide one.
-    fixed = len("  #   P(value)   P(v&T)   D(T-F) P(true)  mass tok paths pre")
+    fixed = len("  #      P*D  P(value)   P(v&T)   D(T-F) P(true)  mass tok paths pre")
     width = width or shutil.get_terminal_size((100, 24)).columns
     vw = max(12, min(40, width - fixed))
 
     head = (
-        f"{'#':>3}  {'value':<{vw}} {'P(value)':>9} {'P(v&T)':>8} "
+        f"{'#':>3}  {'value':<{vw}} {'P*D':>8} {'P(value)':>9} {'P(v&T)':>8} "
         f"{'D(T-F)':>7} {'P(true)':>7} {'mass':>5} {'tok':>3} {'paths':>5} pre"
     )
     lines = [head, "-" * len(head)]
     shown = result.select(sort)
     for row in shown:
         b = row.bool_score
-        cells = f"{row.rank:>3}  {row.value[:vw]:<{vw}} {row.candidate.prob:>9.5f} "
+        cells = f"{row.rank:>3}  {row.value[:vw]:<{vw}} "
         if b is None:
-            cells += f"{'-':>8} {'-':>7} {'-':>7} {'-':>5} "
+            cells += f"{'-':>8} {row.candidate.prob:>9.5f} {'-':>8} "
+            cells += f"{'-':>7} {'-':>7} {'-':>5} "
         else:
             cells += (
+                f"{row.signal:>+8.4f} {row.candidate.prob:>9.5f} "
                 f"{row.joint_prob:>8.5f} {b.delta:>+7.2f} "
                 f"{b.p_true:>7.2f} {b.bool_mass:>5.3f} "
             )
@@ -164,6 +186,7 @@ def format_table(result: RunResult, sort: str = "value", width: int = 0) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    sort = resolve_sort(args)
     config = RunConfig(
         field=args.field,
         bool_field=args.bool_field,
@@ -187,12 +210,12 @@ def main(argv: list[str] | None = None) -> int:
     result = run(lm, config)
 
     if args.objects:
-        for row in result.select(args.sort):
+        for row in result.select(sort):
             print(json.dumps(row.as_object(result.schema), ensure_ascii=False))
     elif args.json:
-        print(json.dumps(result.as_dict(args.sort), ensure_ascii=False, indent=2))
+        print(json.dumps(result.as_dict(sort), ensure_ascii=False, indent=2))
     else:
-        print(format_table(result, sort=args.sort))
+        print(format_table(result, sort=sort))
     return 0
 
 

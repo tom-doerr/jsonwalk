@@ -8,7 +8,7 @@ that does not exist, a column count that does not match the row.
 import asyncio
 
 from fake_lm import FakeLM
-from jsonwalk.engine import RunConfig, run
+from jsonwalk.engine import SORT_MODES, RunConfig, run
 from jsonwalk.prompt import DEFAULT_PREAMBLE
 from jsonwalk.tui import COLUMNS, HelpScreen, JsonWalkApp, PreambleScreen
 from jsonwalk.walk import WalkConfig
@@ -164,13 +164,13 @@ def test_results_render_one_row_per_value():
     drive(check)
 
 
-def test_sort_cycles_through_all_three_modes():
+def test_sort_cycles_through_every_mode_and_returns_to_the_start():
     result = make_result()
 
     async def check(app, pilot):
         app.show_result(result)
-        assert app.sort_mode == "value"
-        for expected in ("joint", "delta", "value"):
+        assert app.sort_mode == SORT_MODES[0]
+        for expected in SORT_MODES[1:] + SORT_MODES[:1]:
             app.action_sort()
             await pilot.pause()
             assert app.sort_mode == expected

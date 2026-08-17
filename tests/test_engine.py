@@ -117,6 +117,39 @@ def test_rank_stays_the_likelihood_rank_after_resorting():
     ]
 
 
+def test_signal_is_value_probability_times_the_signed_delta():
+    result = do_run()
+    row = next(r for r in result.rows if r.value == "c")
+    delta = math.log(0.10 / 0.70)
+    assert math.isclose(row.signal, 0.30 * delta, rel_tol=1e-9)
+    assert row.signal < 0, "a rejected value must score negative"
+
+
+def test_signal_puts_every_accepted_value_above_every_rejected_one():
+    # The load-bearing property: because the delta keeps its sign, P(value)
+    # orders within a verdict and never across it, so a likely-but-false value
+    # cannot float above an unlikely-but-true one.
+    result = do_run()
+    ordered = result.select("signal", k=len(result.rows))
+    verdicts = [r.bool_score.verdict for r in ordered]
+    assert verdicts == sorted(verdicts, reverse=True)
+
+
+def test_signal_sinks_the_most_likely_rejected_value_furthest():
+    # "c" (P=0.30, false) must land below "a" (P=0.25, delta 0): being both
+    # common and rejected is the worst combination, not a mitigating one.
+    result = do_run()
+    ordered = [r.value for r in result.select("signal", k=len(result.rows))]
+    assert ordered[-1] == "c"
+
+
+def test_signal_requires_a_boolean_score():
+    lm = FakeLM(VOCAB, TABLE)
+    cfg = RunConfig(field="n", bool_field="b", preamble="", score_bool=False)
+    with pytest.raises(ValueError):
+        _ = run(lm, cfg).rows[0].signal
+
+
 def test_joint_is_value_probability_times_p_true():
     result = do_run()
     row = next(r for r in result.rows if r.value == "ab")

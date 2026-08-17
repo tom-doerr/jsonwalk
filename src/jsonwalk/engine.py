@@ -89,6 +89,26 @@ class Row:
     def joint_prob(self) -> float:
         return math.exp(self.joint_logprob)
 
+    @property
+    def signal(self) -> float:
+        """``P(value) * D(T-F)`` -- likelihood-weighted evidence.
+
+        A ranking heuristic, not a probability: it multiplies a probability by
+        a log-odds. What it buys is that the delta keeps its *sign*, so every
+        value the model calls true outranks every value it calls false, and
+        ``P(value)`` orders within each group rather than across it. A common
+        value the model rejects therefore sinks to the very bottom instead of
+        floating on its own popularity.
+
+        Contrast ``joint``, where ``p_true`` saturates: +1.4 and +2.3 nats
+        differ by only 0.80 vs 0.90, so a 10x spread in ``P(value)`` swamps the
+        verdict and a likely-but-false value can outrank an unlikely-but-true
+        one. Here the sign prevents that outright.
+        """
+        if self.bool_score is None:
+            raise ValueError("signal needs a boolean score; run with score_bool")
+        return self.candidate.prob * self.bool_score.delta
+
     def as_object(self, schema: Schema) -> dict[str, object]:
         """The JSON object this row stands for."""
         truth = self.bool_score.verdict if self.bool_score else False
@@ -110,35 +130,43 @@ class Row:
             out["p_true"] = self.bool_score.p_true
             out["bool_mass"] = self.bool_score.bool_mass
             out["joint_prob"] = self.joint_prob
+            out["signal"] = self.signal
             out["per_word_logprob"] = self.bool_score.per_word
         return out
 
 
-SORT_MODES = ("value", "joint", "delta")
+SORT_MODES = ("signal", "joint", "value", "delta")
+
+DEFAULT_SORT = "signal"
 
 SORT_LABELS = {
-    "value": "value likelihood",
+    "signal": "P(value) x D(T-F)",
     "joint": "P(value) x P(true)",
+    "value": "value likelihood",
     "delta": "true/false delta",
 }
 
+#: Modes that need a boolean score to mean anything.
+BOOL_SORT_MODES = frozenset({"signal", "joint", "delta"})
+
 
 def sort_rows(rows: "tuple[Row, ...] | list[Row]", mode: str) -> list[Row]:
-    """Order rows by one of the three meaningful rankings.
+    """Order rows by one of the four rankings.
 
     ``value`` answers "what would the model write here", ``delta`` answers
-    "what does it most believe", and ``joint`` answers "what is both likely
-    and true" -- which is usually the actual question.
+    "what does it most believe", ``joint`` is the probability of the whole
+    object, and ``signal`` -- the default -- weights the signed verdict by
+    likelihood so that popularity ranks within a verdict, never across it.
     """
     if mode not in SORT_MODES:
         raise ValueError(f"unknown sort mode {mode!r}; pick one of {SORT_MODES}")
     if mode == "value":
         return sorted(rows, key=lambda r: -r.candidate.logprob)
+    if mode == "signal":
+        return sorted(rows, key=lambda r: -r.signal)
     if mode == "joint":
         return sorted(rows, key=lambda r: -r.joint_logprob)
-    return sorted(
-        rows, key=lambda r: -(r.bool_score.delta if r.bool_score else 0.0)
-    )
+    return sorted(rows, key=lambda r: -r.bool_score.delta)
 
 
 @dataclass(frozen=True)
@@ -156,11 +184,11 @@ class RunResult:
     value_prompt: str
     k: int = 20
 
-    def select(self, mode: str = "value", k: int | None = None) -> list[Row]:
+    def select(self, mode: str = DEFAULT_SORT, k: int | None = None) -> list[Row]:
         """Sort the whole pool, then take the top k. Order matters."""
         return sort_rows(self.rows, mode)[: self.k if k is None else k]
 
-    def as_dict(self, mode: str = "value") -> dict[str, object]:
+    def as_dict(self, mode: str = DEFAULT_SORT) -> dict[str, object]:
         return {
             "field": self.schema.field,
             "bool_field": self.schema.bool_field,
