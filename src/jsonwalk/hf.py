@@ -20,9 +20,9 @@ from collections.abc import Sequence
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .lm import TopK
+from .lm import DEFAULT_MODEL, TopK
 
-DEFAULT_MODEL = "Qwen/Qwen3.5-0.8B-Base"
+__all__ = ["DEFAULT_MODEL", "HFLanguageModel"]
 
 
 def _buckets(sequences: Sequence[Sequence[int]], key) -> dict:

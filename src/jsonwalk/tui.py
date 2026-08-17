@@ -24,7 +24,7 @@ from textual.widgets import (
 )
 
 from .engine import RunConfig, RunResult, run
-from .hf import DEFAULT_MODEL, HFLanguageModel
+from .lm import DEFAULT_MODEL
 from .prompt import DEFAULT_PREAMBLE
 from .walk import WalkConfig, WalkStats
 
@@ -68,7 +68,7 @@ class JsonWalkApp(App):
         super().__init__()
         self.model_id = model_id
         self.k = k
-        self.lm: HFLanguageModel | None = None
+        self.lm = None  # HFLanguageModel, built on first run inside the worker
         self.result: RunResult | None = None
         self.sort_by_delta = False
         self.busy = False
@@ -159,6 +159,9 @@ class JsonWalkApp(App):
                 self.call_from_thread(
                     self.set_status, f"loading {self.model_id} (first run only)..."
                 )
+                # Deferred so the UI paints before torch is imported.
+                from .hf import HFLanguageModel
+
                 self.lm = HFLanguageModel(self.model_id)
 
             def progress(stats: WalkStats) -> None:
@@ -243,9 +246,12 @@ class JsonWalkApp(App):
 def main(argv: list[str] | None = None) -> int:
     import argparse
 
-    p = argparse.ArgumentParser(prog="jsonwalk-tui", description=JsonWalkApp.__doc__)
-    p.add_argument("--model", default=DEFAULT_MODEL)
-    p.add_argument("-k", type=int, default=20)
+    p = argparse.ArgumentParser(
+        prog="jsonwalk tui",
+        description=f"{JsonWalkApp.__doc__} Also opened by bare `jsonwalk`.",
+    )
+    p.add_argument("--model", default=DEFAULT_MODEL, help="HF model id")
+    p.add_argument("-k", type=int, default=20, help="values to return")
     args = p.parse_args(argv)
     JsonWalkApp(model_id=args.model, k=args.k).run()
     return 0

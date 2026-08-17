@@ -120,32 +120,55 @@ if you do want same-domain examples for a fixed task.
 ```bash
 git clone git@github.com:tom-doerr/jsonwalk.git
 cd jsonwalk
-pip install -e ".[dev]"
+pipx install --system-site-packages --editable .
 ```
 
-Needs `torch`, `transformers` and `textual`. The model (~1.7 GB) downloads
-from the Hub on first run.
+That puts a `jsonwalk` command on your `PATH`. Needs `torch`, `transformers`
+and `textual`; the model (~1.7 GB) downloads from the Hub on first run.
 
-If those three are already present system-wide (and `pip install` refuses
-because the environment is externally managed, PEP 668), skip the install and
-run straight from the checkout:
+**`--system-site-packages` is the load-bearing flag.** Without it pipx builds
+a sealed venv and pulls its own `torch` — several GB, and on hardware with a
+purpose-built wheel (a CUDA 13 / GB10 box, say) very likely the wrong one.
+With it, the venv reuses the interpreter's existing `torch`, and pip installs
+nothing but `jsonwalk` itself. `--editable` keeps the checkout as the source
+of truth, so edits take effect with no reinstall.
+
+Plain `pip install -e .` works too wherever the environment is not externally
+managed (PEP 668). To run with no install at all:
 
 ```bash
-PYTHONPATH=src python3 -m jsonwalk          # TUI
-PYTHONPATH=src python3 -m jsonwalk run      # headless
+PYTHONPATH=src python3 -m jsonwalk city_name is_in_europe
 ```
+
+Uninstall with `pipx uninstall jsonwalk`.
 
 ## Use
 
+Give it two field names and it prints a table:
+
 ```bash
-jsonwalk                              # the TUI
-jsonwalk run                          # headless, default fields
-jsonwalk run city_name is_in_europe -k 30
-jsonwalk run product_name is_expensive --objects   # one JSON object per line
-jsonwalk run startup_name good_name --json | jq '.rows[0]'
+jsonwalk city_name is_in_europe             # the common case
+jsonwalk startup_name good_name -k 30       # more candidates
+jsonwalk pet_name is_cute --objects         # one JSON object per line
+jsonwalk pet_name is_cute --json | jq .     # everything, machine readable
+jsonwalk                                    # no arguments: the TUI
 ```
 
-TUI keys: `ctrl+r` run, `ctrl+s` toggle sorting between value likelihood and
+`--objects` is the pipe-friendly form:
+
+```console
+$ jsonwalk pet_name is_cute -k 4 --objects
+{"pet_name": "Rex", "is_cute": true}
+{"pet_name": "Whiskers", "is_cute": true}
+{"pet_name": "Buddy", "is_cute": true}
+{"pet_name": "Golden Retriever", "is_cute": true}
+```
+
+`run` and `tui` are reserved as the first word (`jsonwalk run …` is the
+explicit form of the default, `jsonwalk tui` opens the interface). A field
+actually named `run` needs `jsonwalk run run <bool_field>`.
+
+In the TUI: `ctrl+r` run, `ctrl+s` toggle sorting between value likelihood and
 true/false delta, `ctrl+y` copy every row as JSON, `ctrl+q` quit. Edit the
 preamble in the box at the top; `{field}` and `{bool_field}` expand to the
 field names you typed.
@@ -206,10 +229,13 @@ context. `score_bools` raises `TokenBoundaryError` if that ever happens.
 pytest
 ```
 
-37 tests, no GPU and no model download required: the search runs against a
-deterministic toy model with a hand-written probability table, including a
-vocabulary where one string has two tokenizations, and is cross-checked
-against exhaustive enumeration. The TUI is exercised headless.
+44 tests in under a second, with no GPU and no model download: the search runs
+against a deterministic toy model with a hand-written probability table,
+including a vocabulary where one string has two tokenizations, and is
+cross-checked against exhaustive enumeration. The TUI is exercised headless.
+One test asserts that importing the CLI does not import torch — that property
+is what keeps `jsonwalk --help` at 40 ms, and it is easy to break by accident
+with a stray top-level import.
 
 ## Licence
 

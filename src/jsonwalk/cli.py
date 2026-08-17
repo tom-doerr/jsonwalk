@@ -6,10 +6,24 @@ import argparse
 import json
 import sys
 
+from . import __version__
 from .engine import RunConfig, RunResult, run
-from .hf import DEFAULT_MODEL, HFLanguageModel
+from .lm import DEFAULT_MODEL
 from .prompt import DEFAULT_PREAMBLE, SCHEMA_ONLY_PREAMBLE
 from .walk import WalkConfig
+
+EPILOG = """\
+examples:
+  jsonwalk city_name is_in_europe            rank cities, judge each
+  jsonwalk startup_name good_name -k 30      more candidates
+  jsonwalk product is_expensive --objects    one JSON object per line
+  jsonwalk pet_name is_cute --json | jq .    full detail, machine readable
+  jsonwalk                                   open the interactive TUI
+
+Read bool_mass first: it is the absolute probability the model writes a
+boolean at all. If it is low the delta is meaningless and the preamble,
+not the search, is what needs fixing.
+"""
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -20,7 +34,10 @@ def build_parser() -> argparse.ArgumentParser:
             "string field, then score a boolean field by the true/false "
             "logprob delta."
         ),
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    p.add_argument("--version", action="version", version=f"jsonwalk {__version__}")
     p.add_argument("field", nargs="?", default="startup_name", help="string field")
     p.add_argument("bool_field", nargs="?", default="good_sounding_name")
     p.add_argument("-k", type=int, default=20, help="values to return")
@@ -118,6 +135,10 @@ def main(argv: list[str] | None = None) -> int:
             max_expansions=args.max_expansions,
         ),
     )
+    # Imported here, not at module scope: pulling in torch costs seconds, and
+    # --help / --version must not pay for it.
+    from .hf import HFLanguageModel
+
     print(f"loading {args.model} ...", file=sys.stderr)
     lm = HFLanguageModel(args.model, batch_size=args.batch_size)
     result = run(lm, config)

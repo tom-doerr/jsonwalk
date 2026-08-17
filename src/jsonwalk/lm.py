@@ -12,6 +12,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
+# Lives here rather than in hf.py so that argument parsing can name the
+# default model without importing torch. `jsonwalk --help` should not pay for
+# a CUDA context.
+DEFAULT_MODEL = "Qwen/Qwen3.5-0.8B-Base"
+
 
 @dataclass(frozen=True)
 class TopK:
